@@ -21,6 +21,6 @@ Thumbs.db
 *.out
 coverage.html
 *.exe
-Outline.md
+
 # Local build caches
 .tmp/
