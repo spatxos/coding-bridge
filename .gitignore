@@ -1,0 +1,26 @@
+# Build output
+/coding-bridge
+/coding-bridge.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime
+.coding-bridge/
+!config.example.yaml
+!task.example.json
+
+# Test coverage
+*.out
+coverage.html
+*.exe
+Outline.md
+# Local build caches
+.tmp/

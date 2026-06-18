@@ -1,0 +1,47 @@
+{
+  "task_id": "fix-modbus-timeout-release-port",
+  "title": "修复 Modbus RTU 超时后串口未释放的问题",
+  "description": "超时后需要释放串口锁，但不得修改协议帧解析逻辑。",
+  "controller": {
+    "provider": "openai",
+    "model": "gpt-5.5"
+  },
+  "executor": {
+    "selection": "auto",
+    "preferred_provider": "deepseek",
+    "preferred_model": "deepseek-chat"
+  },
+  "allowed_files": [
+    "src/Protocols/VfdModbusRtuCollector.cs",
+    "tests/Protocols/VfdModbusRtuCollectorTests.cs"
+  ],
+  "forbidden_files": [
+    ".env",
+    "appsettings.Production.json",
+    "secrets.json",
+    "*.pfx",
+    "*.key"
+  ],
+  "allowed_commands": [
+    "dotnet build",
+    "dotnet test"
+  ],
+  "requirements": [
+    "不得修改协议帧解析逻辑",
+    "不得吞掉异常",
+    "必须保留原有日志格式",
+    "超时后必须释放串口锁"
+  ],
+  "acceptance_criteria": [
+    "dotnet build 成功",
+    "dotnet test 成功",
+    "只修改 allowed_files",
+    "没有新增敏感信息",
+    "没有修改生产配置"
+  ],
+  "risk": {
+    "allow_high_risk": false,
+    "allow_forbidden_read": false
+  },
+  "output_format": "unified_diff_only"
+}

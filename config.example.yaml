@@ -1,0 +1,112 @@
+# coding-bridge 配置文件
+# 所有配置修改后运行: coding-bridge config validate
+
+config_version: 1
+
+# Provider 配置
+providers:
+  # 默认 Executor Model（执行、生成 patch）
+  default_executor: deepseek
+
+  configs:
+    # DeepSeek 配置
+    deepseek:
+      type: deepseek
+      base_url: https://api.deepseek.com
+      api_key: ${DEEPSEEK_API_KEY}   # 从环境变量读取
+      models:                         # 多模型支持
+        - deepseek-chat
+      timeout_seconds: 120
+      max_retry: 2
+      enabled: true
+
+# Provider 选择策略
+provider_selection:
+  mode: auto                              # auto | manual
+
+  strategy:
+    prefer_available: true                # 优先可用的
+    prefer_low_cost: true                 # 优先低成本的
+    prefer_fast_response: true            # 优先响应快的
+    prefer_patch_accuracy: true           # 优先 patch 质量高的
+
+  fallback_order:
+    - deepseek
+
+# 安全配置
+security:
+  forbidden_file_read_policy:
+    default: deny                         # deny | ask | allow
+    allow_user_override: true
+    require_reason: true
+    allow_local_read: true
+    allow_send_masked_to_provider: true
+    allow_send_raw_to_provider: false
+    audit_log: true
+
+# 风险控制
+risk:
+  allow_high_risk_operations: false
+
+  high_risk_policy:
+    require_user_confirm: true
+    require_snapshot_before_execute: true
+    git_snapshot_mode: worktree           # worktree | branch | stash
+    non_git_snapshot_mode: bak
+    allow_delete_files: false
+    allow_modify_config: false
+    allow_run_shell: false
+    allow_database_write: false
+
+# 命令策略
+commands:
+  allowed:
+    - "go build"
+    - "go test"
+    - "go vet"
+    - "dotnet build"
+    - "dotnet test"
+    - "npm test"
+    - "npm run build"
+    - "pytest"
+  forbidden:
+    - "rm -rf"
+    - "git reset --hard"
+    - "git clean -fdx"
+    - "ssh"
+    - "scp"
+    - "curl"
+    - "wget"
+
+# 超时控制（秒）
+timeouts:
+  provider_request_seconds: 120
+  provider_health_seconds: 10
+  patch_apply_seconds: 30
+  command_seconds: 300
+  web_request_seconds: 30
+
+# 编码策略
+encoding:
+  detect_before_write: true
+  preserve_original_encoding: true
+  preserve_line_endings: true
+  reject_on_decode_error: true
+  reject_if_replacement_char_found: true
+  default_encoding: utf-8
+  fallback_encoding:
+    - utf-8-sig
+    - gbk
+    - gb2312
+
+# 报告配置
+report:
+  output_dir: .coding-bridge/reports
+  format: markdown
+  max_history: 100
+
+# Web 服务（默认关闭）
+web:
+  enabled: false  
+  host: 127.0.0.1
+  port: 8765
