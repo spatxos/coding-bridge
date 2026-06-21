@@ -106,10 +106,53 @@ type TaskTransaction struct {
 	RollbackMethod string     `json:"rollback_method,omitempty" yaml:"rollback_method,omitempty"`
 }
 
+// ControllerUsage Controller 的 token 使用信息
+type ControllerUsage struct {
+	Source              string `json:"source"`               // manual, compliance_api, estimated, unavailable
+	ObservedTokens      *int   `json:"observed_tokens"`      // 真实观测值，可能为 null
+	EstimatedTokensMin  int    `json:"estimated_tokens_min"` // 估算最小值
+	EstimatedTokensMax  int    `json:"estimated_tokens_max"` // 估算最大值
+	InputChars          int    `json:"input_chars"`          // 输入字符数
+	OutputChars         int    `json:"output_chars"`         // 输出字符数
+	Confidence          string `json:"confidence"`           // low, medium, high
+}
+
+// WriteState 写入状态摘要
+type WriteState struct {
+	PatchGenerated     bool   `json:"patch_generated"`
+	PatchValidated     bool   `json:"patch_validated"`
+	SnapshotCreated    bool   `json:"snapshot_created"`
+	PatchApplied       bool   `json:"patch_applied"`
+	PatchEffectVerified bool  `json:"patch_effect_verified"`
+	CommandsExecuted   bool   `json:"commands_executed"`
+	RolledBack         bool   `json:"rolled_back"`
+	MainWorkspaceModified bool `json:"main_workspace_modified"`
+	ExecutionMode      string `json:"execution_mode"`
+	ExecutionRoot      string `json:"execution_root"`
+	MergeRequired      bool   `json:"merge_required"`
+}
+
+// FailureInfo 失败信息
+type FailureInfo struct {
+	Code            string `json:"code"`
+	Phase           string `json:"phase"`
+	Message         string `json:"message"`
+	Retryable       bool   `json:"retryable"`
+	SuggestedAction string `json:"suggested_action"`
+}
+
+// Decision 下一步决策
+type Decision struct {
+	RecommendedNextAction string `json:"recommended_next_action"`
+	RequiresUserApproval  bool   `json:"requires_user_approval"`
+	SafeToContinue        bool   `json:"safe_to_continue"`
+}
+
 // TaskResult 任务执行结果
 type TaskResult struct {
 	TaskID                  string                    `json:"task_id"`
 	Status                  TaskState                 `json:"status"`
+	Phase                   TaskState                 `json:"phase,omitempty"`
 	Provider                string                    `json:"provider,omitempty"`
 	Model                   string                    `json:"model,omitempty"`
 	ContextFiles            int                       `json:"context_files"`
@@ -143,6 +186,13 @@ type TaskResult struct {
 	RollbackInfo            string                    `json:"rollback_info,omitempty"`
 	StartedAt               time.Time                 `json:"started_at"`
 	FinishedAt              time.Time                 `json:"finished_at"`
+	// 新增轻量状态字段
+	WriteState_           *WriteState      `json:"write_state,omitempty"`
+	Failure               *FailureInfo     `json:"failure,omitempty"`
+	ControllerUsage_      *ControllerUsage `json:"controller_usage,omitempty"`
+	Decision_             *Decision        `json:"decision,omitempty"`
+	// 轻量 artifact 路径
+	Artifacts map[string]string `json:"artifacts,omitempty"`
 }
 
 type FileHashChange struct {
@@ -212,6 +262,59 @@ func (t *Task) Validate() []error {
 
 	if t.OutputFormat == "" {
 		t.OutputFormat = "unified_diff_only"
+	}
+
+	return errs
+}
+
+// ValidateTextBudgets 校验任务文本预算限制。
+// maxDescChars: description 最大字符数
+// maxReqChars: requirements 总字符数上限
+// maxAccCriteriaChars: acceptance_criteria 总字符数上限
+// maxAccCriteriaCount: acceptance_criteria 数量上限
+// maxReqCount: requirements 数量上限
+func (t *Task) ValidateTextBudgets(maxDescChars, maxReqChars, maxAccCriteriaChars, maxAccCriteriaCount, maxReqCount int) []error {
+	var errs []error
+
+	if maxDescChars > 0 && len(t.Description) > maxDescChars {
+		errs = append(errs, fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: task.description is %d chars, max is %d. Do not embed full documents or source code in task.json. Use allowed_files instead.",
+			len(t.Description), maxDescChars,
+		))
+	}
+
+	totalReqChars := 0
+	for _, req := range t.Requirements {
+		totalReqChars += len(req)
+	}
+	if maxReqCount > 0 && len(t.Requirements) > maxReqCount {
+		errs = append(errs, fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: task has %d requirements, max is %d",
+			len(t.Requirements), maxReqCount,
+		))
+	}
+	if maxReqChars > 0 && totalReqChars > maxReqChars {
+		errs = append(errs, fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: sum(requirements) is %d chars, max is %d",
+			totalReqChars, maxReqChars,
+		))
+	}
+
+	totalAccChars := 0
+	for _, ac := range t.AcceptanceCriteria {
+		totalAccChars += len(ac)
+	}
+	if maxAccCriteriaCount > 0 && len(t.AcceptanceCriteria) > maxAccCriteriaCount {
+		errs = append(errs, fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: task has %d acceptance criteria, max is %d",
+			len(t.AcceptanceCriteria), maxAccCriteriaCount,
+		))
+	}
+	if maxAccCriteriaChars > 0 && totalAccChars > maxAccCriteriaChars {
+		errs = append(errs, fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: sum(acceptance_criteria) is %d chars, max is %d",
+			totalAccChars, maxAccCriteriaChars,
+		))
 	}
 
 	return errs

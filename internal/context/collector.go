@@ -11,7 +11,63 @@ import (
 const (
 	defaultMaxFileBytes  = 100 * 1024
 	defaultMaxTotalBytes = 64 * 1024
+
+	// ErrForbiddenInternalContext 错误码：禁止将内部状态文件发送到 Executor 上下文
+	ErrForbiddenInternalContext = "FORBIDDEN_INTERNAL_CONTEXT"
 )
+
+// InternalStateDenyPatterns 内部状态目录模式，绝对禁止进入 Executor 上下文
+var InternalStateDenyPatterns = []string{
+	".coding-bridge",
+	".coding-bridge/*",
+	".coding-bridge/**",
+	".git",
+	".git/*",
+	".git/**",
+	"node_modules",
+	"node_modules/*",
+	"node_modules/**",
+	"bin",
+	"bin/*",
+	"bin/**",
+	"obj",
+	"obj/*",
+	"obj/**",
+	"dist",
+	"dist/*",
+	"dist/**",
+	"build",
+	"build/*",
+	"build/**",
+}
+
+// IsInternalStatePath 检查路径是否命中内部状态禁止模式
+func IsInternalStatePath(relPath string) bool {
+	clean := filepath.ToSlash(strings.TrimSpace(relPath))
+	if clean == "" {
+		return false
+	}
+	// 去除前面的 ./ 如果有
+	clean = strings.TrimPrefix(clean, "./")
+
+	for _, deny := range InternalStateDenyPatterns {
+		matched, err := filepath.Match(deny, clean)
+		if err == nil && matched {
+			return true
+		}
+		// 也检查父目录匹配
+		parts := strings.Split(clean, "/")
+		prefix := parts[0]
+		if prefix == "" && len(parts) > 1 {
+			prefix = parts[1]
+		}
+		matched, err = filepath.Match(deny, prefix)
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
 
 // Collector 上下文收集器
 type Collector struct {
@@ -54,6 +110,14 @@ type Context struct {
 
 // Collect 收集允许文件的上下文
 func (c *Collector) Collect() (*Context, error) {
+	// 首先检查 allowed_files 是否包含内部状态路径
+	for _, pattern := range c.allowedFiles {
+		rel := filepath.ToSlash(pattern)
+		if IsInternalStatePath(rel) {
+			return nil, fmt.Errorf("%s: .coding-bridge internal state files cannot be sent to Executor context: %s", ErrForbiddenInternalContext, pattern)
+		}
+	}
+
 	result := &Context{}
 	seen := make(map[string]bool)
 

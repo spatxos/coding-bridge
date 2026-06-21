@@ -65,6 +65,19 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		result.FailureReason = fmt.Sprintf("task validation failed: %v", errs)
 		return r.finish(result, snapshot, fmt.Errorf("validation: %v", errs))
 	}
+	if r.cfg.Execution.EnforceTaskBudgets {
+		if errs := task.ValidateTextBudgets(
+			r.cfg.Execution.MaxDescriptionChars,
+			r.cfg.Execution.MaxRequirementsChars,
+			r.cfg.Execution.MaxAcceptanceCriteriaChars,
+			r.cfg.Execution.MaxAcceptanceCriteriaCount,
+			r.cfg.Execution.MaxRequirementsCount,
+		); len(errs) > 0 {
+			result.Status = StateFailed
+			result.FailureReason = fmt.Sprintf("task text budget exceeded: %v", errs)
+			return r.finish(result, snapshot, fmt.Errorf("text budget: %v", errs))
+		}
+	}
 	_ = sm.Transition(StateValidated)
 
 	// Step 2: 收集允许文件的受控上下文
@@ -614,6 +627,74 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 		}
 	}
 	result.FinishedAt = time.Now()
+
+	// 填充 Phase
+	if result.Phase == "" {
+		result.Phase = result.Status
+	}
+
+	// 填充 WriteState
+	if result.WriteState_ == nil {
+		result.WriteState_ = &WriteState{
+			PatchGenerated:     result.TechnicalVerification != "NOT_STARTED",
+			PatchValidated:     result.TechnicalVerification == "PARSE_AND_VALIDATE_OK" || result.TechnicalVerification == "APPLY_AND_HASH_OK" || result.TechnicalVerification == "TEST_OK" || result.TechnicalVerification == "BUILD_OK" || result.TechnicalVerification == "COMMANDS_OK",
+			SnapshotCreated:    snapshot != nil,
+			PatchApplied:       result.PatchEffectVerified,
+			PatchEffectVerified: result.PatchEffectVerified,
+			CommandsExecuted:   len(result.CommandsRun) > 0,
+			RolledBack:         result.Status != StateCompleted && result.RollbackInfo != "",
+			MainWorkspaceModified: false,
+			ExecutionMode:      "git_worktree",
+			MergeRequired:      result.Status == StateCompleted,
+		}
+	}
+
+	// 填充 Failure info
+	if result.Status != StateCompleted && result.FailureReason != "" {
+		failureCode := deriveFailureCodeFromReason(result.FailureReason)
+		retryable := isRetryableFailure(failureCode)
+		suggestedAction := "abort"
+		if retryable {
+			suggestedAction = "repair_patch"
+		}
+		result.Failure = &FailureInfo{
+			Code:            failureCode,
+			Phase:           string(result.Status),
+			Message:         result.FailureReason,
+			Retryable:       retryable,
+			SuggestedAction: suggestedAction,
+		}
+	}
+
+	// 填充 ControllerUsage
+	controllerSource := "unavailable"
+	var controllerObserved *int
+	if result.ControllerTokens > 0 {
+		controllerSource = "manual"
+		val := result.ControllerTokens
+		controllerObserved = &val
+	}
+	result.ControllerUsage_ = &ControllerUsage{
+		Source:         controllerSource,
+		ObservedTokens: controllerObserved,
+		Confidence:     "low",
+	}
+
+	// 填充 Decision
+	if result.Status == StateCompleted {
+		result.Decision_ = &Decision{
+			RecommendedNextAction: "review_changes",
+			RequiresUserApproval:  true,
+			SafeToContinue:        true,
+		}
+	} else if result.Failure != nil {
+		result.Decision_ = &Decision{
+			RecommendedNextAction: result.Failure.SuggestedAction,
+			RequiresUserApproval:  false,
+			SafeToContinue:        result.Failure.Retryable,
+		}
+	}
+
 	if result.TotalTokens > 0 {
 		if result.Status == StateCompleted {
 			result.ExecutorEffectiveTokens = result.TotalTokens
@@ -627,7 +708,22 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 	if !filepath.IsAbs(outputDir) {
 		outputDir = filepath.Join(r.projectRoot, outputDir)
 	}
-	reportPath, reportErr := report.NewGenerator(outputDir).SaveReport(taskResultToReportData(result))
+	gen := report.NewGeneratorWithConfig(outputDir, report.ReportConfig{
+		OutputDir:                outputDir,
+		Mode:                     r.cfg.Report.Mode,
+		SaveFullReport:           r.cfg.Report.SaveFullReport,
+		SaveFullPatch:            r.cfg.Report.SaveFullPatch,
+		SaveFullCommandOutput:    r.cfg.Report.SaveFullCommandOutput,
+		CommandOutputTailLines:   r.cfg.Report.CommandOutputTailLines,
+		MaxSummaryBytes:          r.cfg.Report.MaxSummaryBytes,
+		MaxFailureMessageBytes:   r.cfg.Report.MaxFailureMessageBytes,
+		IncludeModifiedFileContent: r.cfg.Report.IncludeModifiedFileContent,
+		IncludeDiff:              r.cfg.Report.IncludeDiff,
+		IncludePatch:             r.cfg.Report.IncludePatch,
+		IncludeBackupContent:     r.cfg.Report.IncludeBackupContent,
+		IncludeSnapshotContent:   r.cfg.Report.IncludeSnapshotContent,
+	})
+	reportPath, reportErr := gen.SaveReport(taskResultToReportData(result))
 	if reportErr != nil {
 		if result.FailureReason != "" {
 			result.FailureReason += "; "
@@ -689,6 +785,7 @@ func taskResultToReportData(tr *TaskResult) *report.ReportData {
 	data := &report.ReportData{
 		TaskID:                  tr.TaskID,
 		Status:                  string(tr.Status),
+		Phase:                   string(tr.Phase),
 		Provider:                tr.Provider,
 		Model:                   tr.Model,
 		ContextFiles:            tr.ContextFiles,
@@ -718,6 +815,26 @@ func taskResultToReportData(tr *TaskResult) *report.ReportData {
 		RollbackInfo:            tr.RollbackInfo,
 		StartedAt:               tr.StartedAt,
 		FinishedAt:              tr.FinishedAt,
+		SnapshotCreated:         tr.WriteState_ != nil && tr.WriteState_.SnapshotCreated,
+		ExecutionMode:           "git_worktree",
+		MergeRequired:           tr.Status == StateCompleted,
+	}
+
+	// 复制 failure info
+	if tr.Failure != nil {
+		data.FailureCode = tr.Failure.Code
+		data.FailurePhase = tr.Failure.Phase
+		data.Retryable = tr.Failure.Retryable
+		data.SuggestedAction = tr.Failure.SuggestedAction
+	}
+
+	// 复制 write state
+	if tr.WriteState_ != nil {
+		data.SnapshotCreated = tr.WriteState_.SnapshotCreated
+		data.ExecutionMode = tr.WriteState_.ExecutionMode
+		data.ExecutionRoot = tr.WriteState_.ExecutionRoot
+		data.MergeRequired = tr.WriteState_.MergeRequired
+		data.MainWorkspaceModified = tr.WriteState_.MainWorkspaceModified
 	}
 
 	for _, cmd := range tr.CommandsRun {
@@ -757,4 +874,45 @@ func taskResultToReportData(tr *TaskResult) *report.ReportData {
 	}
 
 	return data
+}
+
+// deriveFailureCodeFromReason 从失败原因推导失败码
+func deriveFailureCodeFromReason(reason string) string {
+	switch {
+	case strings.Contains(reason, "TASK_TEXT_TOO_LARGE"):
+		return "TASK_TEXT_TOO_LARGE"
+	case strings.Contains(reason, "FORBIDDEN_INTERNAL_CONTEXT"):
+		return "FORBIDDEN_INTERNAL_CONTEXT"
+	case strings.Contains(reason, "TRUNCATED_OUTPUT"):
+		return "TRUNCATED_OUTPUT"
+	case strings.Contains(reason, "patch parse failed"):
+		return "PATCH_PARSE_FAILED"
+	case strings.Contains(reason, "patch validation failed"):
+		return "PATCH_VALIDATE_FAILED"
+	case strings.Contains(reason, "patch apply failed"):
+		return "PATCH_APPLY_FAILED"
+	case strings.Contains(reason, "NO_EFFECTIVE_CHANGE"):
+		return "NO_EFFECTIVE_CHANGE"
+	case strings.Contains(reason, "command") && strings.Contains(reason, "failed"):
+		return "COMMAND_FAILED"
+	case strings.Contains(reason, "build") && strings.Contains(reason, "fail"):
+		return "BUILD_FAILED"
+	case strings.Contains(reason, "test") && strings.Contains(reason, "fail"):
+		return "TEST_FAILED"
+	case strings.Contains(reason, "rollback") && strings.Contains(reason, "fail"):
+		return "ROLLBACK_FAILED"
+	default:
+		return "UNKNOWN_FAILED"
+	}
+}
+
+// isRetryableFailure 判断失败是否可重试
+func isRetryableFailure(code string) bool {
+	switch code {
+	case "PATCH_PARSE_FAILED", "PATCH_VALIDATE_FAILED", "PATCH_APPLY_FAILED",
+		"COMMAND_FAILED", "BUILD_FAILED", "TEST_FAILED", "TRUNCATED_OUTPUT":
+		return true
+	default:
+		return false
+	}
 }

@@ -16,24 +16,71 @@ import (
 )
 
 var reportProject string
+var statusJSON bool
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
+	Use:   "status [task-id]",
 	Short: "查看任务状态",
-	Long:  "查看当前项目的任务执行状态。",
+	Long: `查看当前项目的任务执行状态。
+
+不带参数时列出所有任务摘要。
+指定 task-id 时显示该任务的详细状态。
+
+示例:
+  coding-bridge status
+  coding-bridge status task-123
+  coding-bridge status task-123 --json`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectRoot, err := resolveProjectRoot(reportProject)
 		if err != nil {
 			return fmt.Errorf("获取当前目录失败: %w", err)
 		}
-		snapshots, err := listFiles(filepath.Join(projectRoot, ".coding-bridge", "snapshots"), ".json")
+
+		// 如果指定了 task-id，显示该任务状态
+		if len(args) > 0 {
+			taskID := args[0]
+			statePath := filepath.Join(projectRoot, ".coding-bridge", "reports", taskID, "state.json")
+			content, err := os.ReadFile(statePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// 也尝试检查旧格式报告
+					reports, listErr := listFiles(filepath.Join(projectRoot, ".coding-bridge", "reports"), "-report.md")
+					if listErr == nil {
+						reportPath, selErr := selectReport(reports, taskID)
+						if selErr == nil {
+							content, err = os.ReadFile(reportPath)
+							if err == nil {
+								fmt.Printf("📄 报告: %s\n\n", reportPath)
+								fmt.Print(string(content))
+								return nil
+							}
+						}
+					}
+					return fmt.Errorf("未找到任务 %s 的状态报告", taskID)
+				}
+				return fmt.Errorf("读取状态文件失败: %w", err)
+			}
+
+			if statusJSON {
+				fmt.Print(string(content))
+				return nil
+			}
+
+			// 简单美化输出
+			fmt.Printf("📊 任务状态: %s\n\n", taskID)
+			fmt.Print(string(content))
+			return nil
+		}
+
+		// 无参数：列出所有任务
+		snapshots, err := listSubdirs(filepath.Join(projectRoot, ".coding-bridge", "snapshots"))
 		if err != nil {
 			return err
 		}
-		reports, err := listFiles(filepath.Join(projectRoot, ".coding-bridge", "reports"), "-report.md")
-		if err != nil {
-			return err
-		}
+
+		// 列出新的 per-task 报告目录
+		reportDirs, _ := listSubdirs(filepath.Join(projectRoot, ".coding-bridge", "reports"))
 
 		fmt.Println("📊 任务状态:")
 		if len(snapshots) == 0 {
@@ -41,12 +88,13 @@ var statusCmd = &cobra.Command{
 		} else {
 			fmt.Printf("  待审查/可回滚任务: %d\n", len(snapshots))
 			for _, snapshot := range snapshots {
-				fmt.Printf("    - %s\n", strings.TrimSuffix(filepath.Base(snapshot), ".json"))
+				fmt.Printf("    - %s\n", snapshot)
 			}
 		}
-		fmt.Printf("  历史报告: %d\n", len(reports))
+		fmt.Printf("  历史报告: %d\n", len(reportDirs))
 		fmt.Println()
-		fmt.Println("使用 'coding-bridge report latest' 查看最近报告")
+		fmt.Println("使用 'coding-bridge report <task-id>' 查看报告")
+		fmt.Println("使用 'coding-bridge status <task-id> --json' 查看状态 JSON")
 		return nil
 	},
 }
@@ -54,7 +102,7 @@ var statusCmd = &cobra.Command{
 var reportCmd = &cobra.Command{
 	Use:   "report [latest|task-id]",
 	Short: "查看任务报告",
-	Long: `查看任务执行报告。
+	Long: `查看任务执行报告（默认输出 summary）。
 
 示例:
   coding-bridge report latest    # 查看最新报告
@@ -70,7 +118,50 @@ var reportCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("确定项目根目录失败: %w", err)
 		}
-		reports, err := listFiles(filepath.Join(projectRoot, ".coding-bridge", "reports"), "-report.md")
+
+		reportsDir := filepath.Join(projectRoot, ".coding-bridge", "reports")
+
+		// 优先查找新的 per-task 目录结构
+		if target != "stats" && target != "latest" {
+			summaryPath := filepath.Join(reportsDir, target, "summary.md")
+			if content, err := os.ReadFile(summaryPath); err == nil {
+				fmt.Printf("📄 报告: %s\n\n", target)
+				fmt.Print(string(content))
+				return nil
+			}
+		}
+
+		// 查找最新报告（新目录结构）
+		if target == "latest" || target == "" {
+			entries, err := os.ReadDir(reportsDir)
+			if err == nil {
+				var newest string
+				var newestTime int64
+				for _, entry := range entries {
+					if entry.IsDir() {
+						summaryPath := filepath.Join(reportsDir, entry.Name(), "summary.md")
+						info, err := os.Stat(summaryPath)
+						if err == nil {
+							if mod := info.ModTime().Unix(); mod > newestTime {
+								newestTime = mod
+								newest = summaryPath
+							}
+						}
+					}
+				}
+				if newest != "" {
+					content, err := os.ReadFile(newest)
+					if err == nil {
+						fmt.Printf("📄 报告: %s\n\n", filepath.Base(filepath.Dir(newest)))
+						fmt.Print(string(content))
+						return nil
+					}
+				}
+			}
+		}
+
+		// 回退到旧的 flat 文件格式
+		reports, err := listFiles(reportsDir, "-report.md")
 		if err != nil {
 			return err
 		}
@@ -79,7 +170,7 @@ var reportCmd = &cobra.Command{
 		}
 		reportPath, err := selectReport(reports, target)
 		if err != nil {
-			return err
+			return fmt.Errorf("未找到任务 %s 的报告", target)
 		}
 		content, err := os.ReadFile(reportPath)
 		if err != nil {
@@ -200,6 +291,24 @@ func listFiles(dir, suffix string) ([]string, error) {
 	return files, nil
 }
 
+// listSubdirs 列出目录下的子目录名
+func listSubdirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取目录 %s 失败: %w", dir, err)
+	}
+	var dirs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, entry.Name())
+		}
+	}
+	return dirs, nil
+}
+
 func selectReport(reports []string, target string) (string, error) {
 	if target == "" || target == "latest" {
 		if len(reports) == 0 {
@@ -224,4 +333,5 @@ func selectReport(reports []string, target string) (string, error) {
 
 func init() {
 	reportCmd.Flags().StringVar(&reportProject, "project", "", "项目根目录；默认从当前目录向上查找 .coding-bridge 或 .git")
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "以 JSON 格式输出 state.json 内容")
 }

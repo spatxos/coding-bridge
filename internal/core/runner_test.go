@@ -401,3 +401,87 @@ func validTestTask() *Task {
 		OutputFormat:       "unified_diff_only",
 	}
 }
+
+func TestRunnerRejectsTaskWithTooLongDescription(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.Description = strings.Repeat("x", 3000) // exceeds default 2000
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsTaskWithTooManyRequirements(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	reqs := make([]string, 60)
+	for i := range reqs {
+		reqs[i] = "x"
+	}
+	task.Requirements = reqs
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsTaskWithTooLongAcceptanceCriteria(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.AcceptanceCriteria = []string{strings.Repeat("y", 5000)} // exceeds default 4000
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsTaskWithTooManyAcceptanceCriteria(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	acc := make([]string, 25)
+	for i := range acc {
+		acc[i] = "x"
+	}
+	task.AcceptanceCriteria = acc
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}

@@ -133,9 +133,14 @@ func codexInstructionsBlock(cfg *config.AppConfig) string {
 		"8. Run `coding-bridge run .coding-bridge/tasks/<task-id>.json --dry-run` in the terminal, then run the same command without `--dry-run`.",
 		"9. If `sharing_approved` is true, project initialization records approval to send task allowlisted source files to configured external Executors; do not ask for the same approval again. If false, obtain explicit approval before the first external send.",
 		"10. If dry-run shows all configured Executor providers are unavailable and `fallback_to_codex` is true, continue with Codex's normal local implementation workflow. Otherwise stop and report the provider failure.",
-		"11. Read the report through the terminal with `coding-bridge report <task-id>`. Treat a failed command, failed security check, or failed task status as a failed task.",
-		"12. If the result is in a Git worktree, inspect the worktree and report its path. Do not claim the main working tree was changed and do not merge automatically unless the user explicitly approves merging.",
-		"13. Summarize modified files, verification results, Executor token usage, estimated savings, report path, and rollback command. Use `coding-bridge rollback <task-id>` when the user asks to discard the bridge result.",
+		"11. After running coding-bridge, first read: `coding-bridge status <task-id> --json` to get the state. Then read: `coding-bridge report <task-id>` for the summary.",
+		"12. Do NOT read full patch, full diff, or full command logs unless failure diagnosis requires it. The summary and state.json contain everything needed for normal decision-making.",
+		"13. Do NOT read .coding-bridge/backups/**, .coding-bridge/snapshots/**, or .coding-bridge/reports/** full artifacts by default.",
+		"14. Do NOT include .coding-bridge/** in allowed_files. This includes .coding-bridge/config.yaml, .coding-bridge/backups/**, .coding-bridge/reports/**, .coding-bridge/snapshots/**, and .coding-bridge/tasks/**.",
+		"15. Keep task.json short. Do NOT embed full source files, full reports, or long documents in task.json. Use allowed_files for source context.",
+		"16. Each task should modify at most 3 files unless explicitly configured.",
+		"17. If the result is in a Git worktree, inspect the worktree and report its path. Do not claim the main working tree was changed and do not merge automatically unless the user explicitly approves merging.",
+		"18. Summarize modified files, verification results, Executor token usage, report path, and rollback command. Use `coding-bridge rollback <task-id>` when the user asks to discard the bridge result.",
 		codexBlockEnd,
 	}
 	return strings.Join(lines, "\n")
