@@ -142,6 +142,16 @@ func (c *Collector) Collect() (*Context, error) {
 				relPath = match
 			}
 			relPath = filepath.ToSlash(relPath)
+
+			// 二次检查：glob 展开后的实际路径是否命中内部状态目录
+			if IsInternalStatePath(relPath) {
+				return nil, fmt.Errorf(
+					"%s: internal state path expanded from allowed_files: %s",
+					ErrForbiddenInternalContext,
+					relPath,
+				)
+			}
+
 			if seen[relPath] {
 				continue
 			}

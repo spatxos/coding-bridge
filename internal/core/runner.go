@@ -61,31 +61,30 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 
 	// Step 1: 验证任务
 	if errs := task.Validate(); len(errs) > 0 {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("task validation failed: %v", errs)
+		markFailure(result, "TASK_VALIDATE_FAILED", "task_validation",
+			fmt.Sprintf("task validation failed: %v", errs), false, "fix_task")
 		return r.finish(result, snapshot, fmt.Errorf("validation: %v", errs))
 	}
-	if r.cfg.Execution.EnforceTaskBudgets {
-		if errs := task.ValidateTextBudgets(
-			r.cfg.Execution.MaxDescriptionChars,
-			r.cfg.Execution.MaxRequirementsChars,
-			r.cfg.Execution.MaxAcceptanceCriteriaChars,
-			r.cfg.Execution.MaxAcceptanceCriteriaCount,
-			r.cfg.Execution.MaxRequirementsCount,
-		); len(errs) > 0 {
-			result.Status = StateFailed
-			result.FailureReason = fmt.Sprintf("task text budget exceeded: %v", errs)
-			return r.finish(result, snapshot, fmt.Errorf("text budget: %v", errs))
-		}
+	if err := r.validateTaskTextBudgets(task); err != nil {
+		markFailure(result, "TASK_TEXT_TOO_LARGE", "task_validation",
+			err.Error(), false, "reduce_task_context")
+		return r.finish(result, snapshot, err)
 	}
 	_ = sm.Transition(StateValidated)
+	result.Phase = StateValidated
 
 	// Step 2: 收集允许文件的受控上下文
 	collector := bridgectx.NewCollector(r.projectRoot, task.AllowedFiles, task.ForbiddenFiles)
 	collectedContext, err := collector.Collect()
 	if err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("context collection failed: %v", err)
+		code := "CONTEXT_COLLECTION_FAILED"
+		action := "fix_allowed_files"
+		if strings.Contains(err.Error(), bridgectx.ErrForbiddenInternalContext) {
+			code = bridgectx.ErrForbiddenInternalContext
+			action = "remove_internal_state_files_from_allowed_files"
+		}
+		markFailure(result, code, "context_collection",
+			fmt.Sprintf("context collection failed: %v", err), false, action)
 		return r.finish(result, snapshot, err)
 	}
 	result.ContextFiles = collectedContext.TotalFiles
@@ -115,22 +114,26 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	// Step 3: 选择 Provider
 	executorProvider, err := r.selectExecutor(ctx, task)
 	if err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("provider selection failed: %v", err)
+		markFailure(result, "PROVIDER_SELECTION_FAILED", "provider_selection",
+			fmt.Sprintf("provider selection failed: %v", err), true, "check_provider_config")
 		return r.finish(result, snapshot, err)
 	}
 	result.Provider = string(executorProvider.Type())
 	_ = sm.Transition(StateProviderSelected)
+	result.Phase = StateProviderSelected
 
 	// Step 4: 请求 Executor 生成 patch
 	_ = sm.Transition(StatePatchRequested)
 	patchResponse, err := r.requestPatch(ctx, task, executorProvider, collectedContext)
 	result.GenerationAttempts = 1
 	if err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("patch generation failed: %v", err)
+		markFailure(result, "PATCH_GENERATION_FAILED", "patch_generation",
+			fmt.Sprintf("patch generation failed: %v", err), true, "retry_or_split_task")
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, err)
 	}
+	result.PatchGenerated = true
+	result.Phase = StatePatchGenerated
 	result.Model = patchResponse.Model
 	if result.Model == "" {
 		result.Model = task.Executor.PreferredModel
@@ -143,12 +146,11 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.TechnicalVerification = "PATCH_GENERATED"
 
 	if strings.EqualFold(strings.TrimSpace(patchResponse.FinishReason), "length") {
-		result.Status = StateFailed
+		markFailure(result, "TRUNCATED_OUTPUT", "patch_generation",
+			fmt.Sprintf("executor output was truncated at %d completion tokens; reduce allowed_files/task scope or increase the patch token budget", result.CompletionTokens),
+			true, "split_task_or_reduce_context")
 		result.TruncatedOutput = true
-		result.FailureReason = fmt.Sprintf(
-			"executor output was truncated at %d completion tokens; reduce allowed_files/task scope or increase the patch token budget",
-			result.CompletionTokens,
-		)
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	}
 
@@ -156,22 +158,26 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	responseContent := strings.TrimSpace(patchResponse.Content)
 	switch responseContent {
 	case "NEED_MORE_CONTEXT":
-		result.Status = StateFailed
-		result.FailureReason = "executor returned NEED_MORE_CONTEXT"
+		markFailure(result, "PATCH_GENERATION_FAILED", "patch_generation",
+			"executor returned NEED_MORE_CONTEXT", true, "provide_more_context")
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	case "REFUSE":
-		result.Status = StateFailed
-		result.FailureReason = "executor returned REFUSE"
+		markFailure(result, "PATCH_GENERATION_FAILED", "patch_generation",
+			"executor returned REFUSE", false, "abort")
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	case "FAILED":
-		result.Status = StateFailed
-		result.FailureReason = "executor returned FAILED"
+		markFailure(result, "PATCH_GENERATION_FAILED", "patch_generation",
+			"executor returned FAILED", false, "abort")
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	}
 	if !patch.HasEndMarker(responseContent) {
-		result.Status = StateFailed
+		markFailure(result, "TRUNCATED_OUTPUT", "patch_generation",
+			"TRUNCATED_OUTPUT: executor response is missing END_CODING_BRIDGE_EDIT", true, "split_task_or_reduce_context")
 		result.TruncatedOutput = true
-		result.FailureReason = "TRUNCATED_OUTPUT: executor response is missing END_CODING_BRIDGE_EDIT"
+		result.PatchGenerated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	}
 
@@ -179,31 +185,34 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	parser := patch.NewParser()
 	parseResult, err := parser.Parse(responseContent)
 	if err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("patch parse failed: %v", err)
+		markFailure(result, "PATCH_PARSE_FAILED", "patch_parse",
+			fmt.Sprintf("patch parse failed: %v", err), true, "repair_patch")
+		result.PatchValidated = false
 		return r.finish(result, snapshot, err)
 	}
 	result.GitDiff = parseResult.RawDiff
 	result.PatchChangedLines = countPatchChangedLines(parseResult)
 	if r.cfg.Execution.EnforceTaskBudgets &&
 		result.PatchChangedLines > r.cfg.Execution.MaxPatchLines {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf(
-			"PATCH_TOO_LARGE: %d changed lines exceeds configured maximum %d; split the task",
-			result.PatchChangedLines,
-			r.cfg.Execution.MaxPatchLines,
-		)
+		markFailure(result, "PATCH_TOO_LARGE", "patch_parse",
+			fmt.Sprintf("PATCH_TOO_LARGE: %d changed lines exceeds configured maximum %d; split the task",
+				result.PatchChangedLines, r.cfg.Execution.MaxPatchLines),
+			true, "split_task")
+		result.PatchValidated = false
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	}
 
 	validator := patch.NewValidator(task.AllowedFiles, task.ForbiddenFiles, task.Requirements)
 	if errs := validator.Validate(parseResult); len(errs) > 0 {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("patch validation failed: %v", errs)
+		markFailure(result, "PATCH_VALIDATE_FAILED", "patch_validation",
+			fmt.Sprintf("patch validation failed: %v", errs), true, "repair_patch")
+		result.PatchValidated = false
 		return r.finish(result, snapshot, fmt.Errorf("validation: %v", errs))
 	}
+	result.PatchValidated = true
 	_ = sm.Transition(StatePatchValidated)
 	result.TechnicalVerification = "PARSE_AND_VALIDATE_OK"
+	result.Phase = StatePatchValidated
 
 	// Step 6: 风险检查
 	_ = sm.Transition(StateRiskChecked)
@@ -211,16 +220,23 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	// Step 7: 创建快照
 	snapshot, err = r.sandbox.CreateSnapshot(task.TaskID)
 	if err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("snapshot creation failed: %v", err)
+		markFailure(result, "SNAPSHOT_FAILED", "snapshot",
+			fmt.Sprintf("snapshot creation failed: %v", err), false, "fix_workspace_or_permissions")
+		result.SnapshotCreated = false
 		return r.finish(result, snapshot, err)
 	}
 	if err := r.sandbox.PrepareSnapshot(snapshot, patchTargetFiles(parseResult)); err != nil {
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("snapshot preparation failed: %v", err)
+		markFailure(result, "SNAPSHOT_FAILED", "snapshot",
+			fmt.Sprintf("snapshot preparation failed: %v", err), false, "fix_workspace_or_permissions")
+		result.SnapshotCreated = false
 		return r.finish(result, snapshot, err)
 	}
+	result.SnapshotCreated = true
+	result.ExecutionMode = string(snapshot.Method)
+	result.ExecutionRoot = r.sandbox.ExecutionRoot(snapshot)
+	result.MainWorkspaceModified = false
 	_ = sm.Transition(StateSnapshotCreated)
+	result.Phase = StateSnapshotCreated
 
 	// Step 8: 在隔离执行目录应用 Patch
 	executionRoot := r.sandbox.ExecutionRoot(snapshot)
@@ -228,8 +244,9 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	beforeHashes, err := hashTargetFiles(executionRoot, targetFiles)
 	if err != nil {
 		rollbackErr := r.sandbox.Rollback(snapshot)
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("capture pre-apply hashes failed: %v", err)
+		markFailure(result, "PATCH_APPLY_FAILED", "patch_apply",
+			fmt.Sprintf("capture pre-apply hashes failed: %v", err), false, "fix_workspace_or_permissions")
+		result.PatchApplied = false
 		result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
 		if rollbackErr != nil {
 			result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
@@ -240,8 +257,10 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	modifiedFiles, err := applier.Apply(parseResult)
 	if err != nil {
 		rollbackErr := r.sandbox.Rollback(snapshot)
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("patch apply failed: %v", err)
+		markFailure(result, "PATCH_APPLY_FAILED", "patch_apply",
+			fmt.Sprintf("patch apply failed: %v", err), true, "repair_patch")
+		result.PatchApplied = false
+		result.RolledBack = rollbackErr == nil
 		result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
 		if rollbackErr != nil {
 			result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
@@ -254,8 +273,11 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 			err = fmt.Errorf("NO_EFFECTIVE_CHANGE: patch applied without changing target file hashes")
 		}
 		rollbackErr := r.sandbox.Rollback(snapshot)
-		result.Status = StateFailed
-		result.FailureReason = fmt.Sprintf("patch effect verification failed: %v", err)
+		markFailure(result, "NO_EFFECTIVE_CHANGE", "patch_apply",
+			fmt.Sprintf("patch effect verification failed: %v", err), true, "repair_patch")
+		result.PatchApplied = true
+		result.PatchEffectVerified = false
+		result.RolledBack = rollbackErr == nil
 		result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
 		if rollbackErr != nil {
 			result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
@@ -264,10 +286,12 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	}
 	result.ModifiedFiles = modifiedFiles
 	result.PatchEffectVerified = true
+	result.PatchApplied = true
 	result.EffectiveChangedFiles = len(hashChanges)
 	result.FileHashChanges = hashChanges
 	_ = sm.Transition(StatePatchApplied)
 	result.TechnicalVerification = "APPLY_AND_HASH_OK"
+	result.Phase = StatePatchApplied
 
 	// Step 9: 执行任务明确允许的构建、测试和检查命令
 	cmdRunner := commands.NewRunner(
@@ -287,9 +311,12 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 			if cmdErr == nil {
 				cmdErr = fmt.Errorf("command %q exited with code %d", cmdStr, cmdResult.ExitCode)
 			}
+			failureCode := classifyCommandFailure(cmdStr)
 			rollbackErr := r.sandbox.Rollback(snapshot)
-			result.Status = StateFailed
-			result.FailureReason = fmt.Sprintf("command execution failed: %v", cmdErr)
+			markFailure(result, failureCode, "command_execution",
+				fmt.Sprintf("command execution failed: %v", cmdErr), true, "repair_patch")
+			result.CommandsExecuted = true
+			result.RolledBack = rollbackErr == nil
 			result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
 			if rollbackErr != nil {
 				result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
@@ -297,6 +324,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 			return r.finish(result, snapshot, cmdErr)
 		}
 	}
+	result.CommandsExecuted = true
 	_ = sm.Transition(StateCommandsExecuted)
 	if result.TestResult != nil {
 		result.TechnicalVerification = "TEST_OK"
@@ -305,6 +333,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	} else {
 		result.TechnicalVerification = "COMMANDS_OK"
 	}
+	result.Phase = StateCommandsExecuted
 
 	// Step 10: 基础安全检查。更完整的 secret scanner 后续接入。
 	result.SecurityCheck = &SecurityCheckResult{Passed: true}
@@ -312,6 +341,9 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	_ = sm.Transition(StateReviewRequired)
 	_ = sm.Transition(StateCompleted)
 	result.Status = StateCompleted
+	result.Phase = StateReviewRequired
+	result.MergeRequired = true
+	result.SuggestedAction = "review_changes"
 	return r.finish(result, snapshot, nil)
 }
 
@@ -518,6 +550,73 @@ func countPatchChangedLines(result *patch.ParseResult) int {
 	return total
 }
 
+// markFailure 标记任务失败，设置标准失败信息
+func markFailure(result *TaskResult, code, phase, message string, retryable bool, action string) {
+	result.Status = StateFailed
+	result.FailureCode = code
+	result.FailurePhase = phase
+	result.FailureReason = message
+	result.Retryable = retryable
+	result.SuggestedAction = action
+	result.Phase = StateFailed
+}
+
+// classifyCommandFailure 根据命令字面分类失败码
+func classifyCommandFailure(cmd string) string {
+	lower := strings.ToLower(cmd)
+	switch {
+	case strings.Contains(lower, "build") || strings.Contains(lower, "go build") || strings.Contains(lower, "dotnet build"):
+		return "BUILD_FAILED"
+	case strings.Contains(lower, "test") || strings.Contains(lower, "pytest") || strings.Contains(lower, "go test") || strings.Contains(lower, "dotnet test"):
+		return "TEST_FAILED"
+	default:
+		return "COMMAND_FAILED"
+	}
+}
+
+// validateTaskTextBudgets 校验 task 文本预算（使用 rune 长度）
+func (r *Runner) validateTaskTextBudgets(task *Task) error {
+	if r.cfg == nil || !r.cfg.Execution.EnforceTaskBudgets {
+		return nil
+	}
+
+	if r.cfg.Execution.MaxDescriptionChars > 0 &&
+		len([]rune(task.Description)) > r.cfg.Execution.MaxDescriptionChars {
+		return fmt.Errorf(
+			"TASK_TEXT_TOO_LARGE: task.description is %d chars, max is %d. Do not embed full documents or source code in task.json. Use allowed_files instead",
+			len([]rune(task.Description)),
+			r.cfg.Execution.MaxDescriptionChars,
+		)
+	}
+
+	totalReqs := totalRuneLen(task.Requirements)
+	if r.cfg.Execution.MaxRequirementsCount > 0 && len(task.Requirements) > r.cfg.Execution.MaxRequirementsCount {
+		return fmt.Errorf("TASK_TEXT_TOO_LARGE: task has %d requirements, max is %d", len(task.Requirements), r.cfg.Execution.MaxRequirementsCount)
+	}
+	if r.cfg.Execution.MaxRequirementsChars > 0 && totalReqs > r.cfg.Execution.MaxRequirementsChars {
+		return fmt.Errorf("TASK_TEXT_TOO_LARGE: sum(requirements) is %d chars, max is %d", totalReqs, r.cfg.Execution.MaxRequirementsChars)
+	}
+
+	totalAcc := totalRuneLen(task.AcceptanceCriteria)
+	if r.cfg.Execution.MaxAcceptanceCriteriaCount > 0 && len(task.AcceptanceCriteria) > r.cfg.Execution.MaxAcceptanceCriteriaCount {
+		return fmt.Errorf("TASK_TEXT_TOO_LARGE: task has %d acceptance criteria, max is %d", len(task.AcceptanceCriteria), r.cfg.Execution.MaxAcceptanceCriteriaCount)
+	}
+	if r.cfg.Execution.MaxAcceptanceCriteriaChars > 0 && totalAcc > r.cfg.Execution.MaxAcceptanceCriteriaChars {
+		return fmt.Errorf("TASK_TEXT_TOO_LARGE: sum(acceptance_criteria) is %d chars, max is %d", totalAcc, r.cfg.Execution.MaxAcceptanceCriteriaChars)
+	}
+
+	return nil
+}
+
+// totalRuneLen 计算字符串切片的 rune 总长度
+func totalRuneLen(items []string) int {
+	total := 0
+	for _, item := range items {
+		total += len([]rune(item))
+	}
+	return total
+}
+
 func (r *Runner) executorModels(task *Task, provider providers.Provider) []string {
 	var models []string
 	if task.Executor.PreferredModel != "" &&
@@ -628,41 +727,34 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 	}
 	result.FinishedAt = time.Now()
 
-	// 填充 Phase
+	// 填充 Phase（由各阶段设置，此处仅做最终 fallback）
 	if result.Phase == "" {
 		result.Phase = result.Status
 	}
 
-	// 填充 WriteState
-	if result.WriteState_ == nil {
-		result.WriteState_ = &WriteState{
-			PatchGenerated:     result.TechnicalVerification != "NOT_STARTED",
-			PatchValidated:     result.TechnicalVerification == "PARSE_AND_VALIDATE_OK" || result.TechnicalVerification == "APPLY_AND_HASH_OK" || result.TechnicalVerification == "TEST_OK" || result.TechnicalVerification == "BUILD_OK" || result.TechnicalVerification == "COMMANDS_OK",
-			SnapshotCreated:    snapshot != nil,
-			PatchApplied:       result.PatchEffectVerified,
-			PatchEffectVerified: result.PatchEffectVerified,
-			CommandsExecuted:   len(result.CommandsRun) > 0,
-			RolledBack:         result.Status != StateCompleted && result.RollbackInfo != "",
-			MainWorkspaceModified: false,
-			ExecutionMode:      "git_worktree",
-			MergeRequired:      result.Status == StateCompleted,
-		}
+	// 从 runner 显式设置的字段填充 WriteState（不猜测）
+	result.WriteState_ = &WriteState{
+		PatchGenerated:        result.PatchGenerated,
+		PatchValidated:        result.PatchValidated,
+		SnapshotCreated:       result.SnapshotCreated,
+		PatchApplied:          result.PatchApplied,
+		PatchEffectVerified:   result.PatchEffectVerified,
+		CommandsExecuted:      result.CommandsExecuted,
+		RolledBack:            result.RolledBack,
+		MainWorkspaceModified: result.MainWorkspaceModified,
+		ExecutionMode:         result.ExecutionMode,
+		ExecutionRoot:         result.ExecutionRoot,
+		MergeRequired:         result.MergeRequired,
 	}
 
-	// 填充 Failure info
-	if result.Status != StateCompleted && result.FailureReason != "" {
-		failureCode := deriveFailureCodeFromReason(result.FailureReason)
-		retryable := isRetryableFailure(failureCode)
-		suggestedAction := "abort"
-		if retryable {
-			suggestedAction = "repair_patch"
-		}
+	// 从 runner 显式设置的字段填充 Failure（不猜测）
+	if result.FailureCode != "" {
 		result.Failure = &FailureInfo{
-			Code:            failureCode,
-			Phase:           string(result.Status),
+			Code:            result.FailureCode,
+			Phase:           result.FailurePhase,
 			Message:         result.FailureReason,
-			Retryable:       retryable,
-			SuggestedAction: suggestedAction,
+			Retryable:       result.Retryable,
+			SuggestedAction: result.SuggestedAction,
 		}
 	}
 
@@ -683,15 +775,21 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 	// 填充 Decision
 	if result.Status == StateCompleted {
 		result.Decision_ = &Decision{
-			RecommendedNextAction: "review_changes",
+			RecommendedNextAction: result.SuggestedAction,
 			RequiresUserApproval:  true,
 			SafeToContinue:        true,
 		}
-	} else if result.Failure != nil {
+		if result.Decision_.RecommendedNextAction == "" {
+			result.Decision_.RecommendedNextAction = "review_changes"
+		}
+	} else {
 		result.Decision_ = &Decision{
-			RecommendedNextAction: result.Failure.SuggestedAction,
+			RecommendedNextAction: result.SuggestedAction,
 			RequiresUserApproval:  false,
-			SafeToContinue:        result.Failure.Retryable,
+			SafeToContinue:        result.Retryable,
+		}
+		if result.Decision_.RecommendedNextAction == "" {
+			result.Decision_.RecommendedNextAction = "abort"
 		}
 	}
 
@@ -709,19 +807,19 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 		outputDir = filepath.Join(r.projectRoot, outputDir)
 	}
 	gen := report.NewGeneratorWithConfig(outputDir, report.ReportConfig{
-		OutputDir:                outputDir,
-		Mode:                     r.cfg.Report.Mode,
-		SaveFullReport:           r.cfg.Report.SaveFullReport,
-		SaveFullPatch:            r.cfg.Report.SaveFullPatch,
-		SaveFullCommandOutput:    r.cfg.Report.SaveFullCommandOutput,
-		CommandOutputTailLines:   r.cfg.Report.CommandOutputTailLines,
-		MaxSummaryBytes:          r.cfg.Report.MaxSummaryBytes,
-		MaxFailureMessageBytes:   r.cfg.Report.MaxFailureMessageBytes,
+		OutputDir:                  outputDir,
+		Mode:                       r.cfg.Report.Mode,
+		SaveFullReport:             r.cfg.Report.SaveFullReport,
+		SaveFullPatch:              r.cfg.Report.SaveFullPatch,
+		SaveFullCommandOutput:      r.cfg.Report.SaveFullCommandOutput,
+		CommandOutputTailLines:     r.cfg.Report.CommandOutputTailLines,
+		MaxSummaryBytes:            r.cfg.Report.MaxSummaryBytes,
+		MaxFailureMessageBytes:     r.cfg.Report.MaxFailureMessageBytes,
 		IncludeModifiedFileContent: r.cfg.Report.IncludeModifiedFileContent,
-		IncludeDiff:              r.cfg.Report.IncludeDiff,
-		IncludePatch:             r.cfg.Report.IncludePatch,
-		IncludeBackupContent:     r.cfg.Report.IncludeBackupContent,
-		IncludeSnapshotContent:   r.cfg.Report.IncludeSnapshotContent,
+		IncludeDiff:                r.cfg.Report.IncludeDiff,
+		IncludePatch:               r.cfg.Report.IncludePatch,
+		IncludeBackupContent:       r.cfg.Report.IncludeBackupContent,
+		IncludeSnapshotContent:     r.cfg.Report.IncludeSnapshotContent,
 	})
 	reportPath, reportErr := gen.SaveReport(taskResultToReportData(result))
 	if reportErr != nil {
@@ -815,9 +913,22 @@ func taskResultToReportData(tr *TaskResult) *report.ReportData {
 		RollbackInfo:            tr.RollbackInfo,
 		StartedAt:               tr.StartedAt,
 		FinishedAt:              tr.FinishedAt,
-		SnapshotCreated:         tr.WriteState_ != nil && tr.WriteState_.SnapshotCreated,
-		ExecutionMode:           "git_worktree",
-		MergeRequired:           tr.Status == StateCompleted,
+
+		// 显式状态字段
+		FailureCode:           tr.FailureCode,
+		FailurePhase:          tr.FailurePhase,
+		Retryable:             tr.Retryable,
+		SuggestedAction:       tr.SuggestedAction,
+		PatchGenerated:        tr.PatchGenerated,
+		PatchValidated:        tr.PatchValidated,
+		SnapshotCreated:       tr.SnapshotCreated,
+		PatchApplied:          tr.PatchApplied,
+		CommandsExecuted:      tr.CommandsExecuted,
+		RolledBack:            tr.RolledBack,
+		ExecutionMode:         tr.ExecutionMode,
+		ExecutionRoot:         tr.ExecutionRoot,
+		MergeRequired:         tr.MergeRequired,
+		MainWorkspaceModified: tr.MainWorkspaceModified,
 	}
 
 	// 复制 failure info
@@ -874,45 +985,4 @@ func taskResultToReportData(tr *TaskResult) *report.ReportData {
 	}
 
 	return data
-}
-
-// deriveFailureCodeFromReason 从失败原因推导失败码
-func deriveFailureCodeFromReason(reason string) string {
-	switch {
-	case strings.Contains(reason, "TASK_TEXT_TOO_LARGE"):
-		return "TASK_TEXT_TOO_LARGE"
-	case strings.Contains(reason, "FORBIDDEN_INTERNAL_CONTEXT"):
-		return "FORBIDDEN_INTERNAL_CONTEXT"
-	case strings.Contains(reason, "TRUNCATED_OUTPUT"):
-		return "TRUNCATED_OUTPUT"
-	case strings.Contains(reason, "patch parse failed"):
-		return "PATCH_PARSE_FAILED"
-	case strings.Contains(reason, "patch validation failed"):
-		return "PATCH_VALIDATE_FAILED"
-	case strings.Contains(reason, "patch apply failed"):
-		return "PATCH_APPLY_FAILED"
-	case strings.Contains(reason, "NO_EFFECTIVE_CHANGE"):
-		return "NO_EFFECTIVE_CHANGE"
-	case strings.Contains(reason, "command") && strings.Contains(reason, "failed"):
-		return "COMMAND_FAILED"
-	case strings.Contains(reason, "build") && strings.Contains(reason, "fail"):
-		return "BUILD_FAILED"
-	case strings.Contains(reason, "test") && strings.Contains(reason, "fail"):
-		return "TEST_FAILED"
-	case strings.Contains(reason, "rollback") && strings.Contains(reason, "fail"):
-		return "ROLLBACK_FAILED"
-	default:
-		return "UNKNOWN_FAILED"
-	}
-}
-
-// isRetryableFailure 判断失败是否可重试
-func isRetryableFailure(code string) bool {
-	switch code {
-	case "PATCH_PARSE_FAILED", "PATCH_VALIDATE_FAILED", "PATCH_APPLY_FAILED",
-		"COMMAND_FAILED", "BUILD_FAILED", "TEST_FAILED", "TRUNCATED_OUTPUT":
-		return true
-	default:
-		return false
-	}
 }

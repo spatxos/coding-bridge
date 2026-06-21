@@ -97,3 +97,35 @@ func TestIsInternalStatePath(t *testing.T) {
 		})
 	}
 }
+
+func TestCollectorRejectsInternalPathAfterGlobExpansion(t *testing.T) {
+	root := t.TempDir()
+	// 创建 .coding-bridge/reports 目录和文件，模拟宽泛 pattern 匹配
+	reportsDir := filepath.Join(root, ".coding-bridge", "reports", "task1")
+	if err := os.MkdirAll(reportsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reportsDir, "summary.md"), []byte("report"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 直接用明确的子路径匹配 .coding-bridge 内部文件
+	collector := NewCollector(root, []string{".coding-bridge/reports/task1/summary.md"}, nil)
+	_, err := collector.Collect()
+	if err == nil {
+		t.Fatal("Collect() error = nil, want FORBIDDEN_INTERNAL_CONTEXT")
+	}
+	if !strings.Contains(err.Error(), ErrForbiddenInternalContext) {
+		t.Fatalf("error = %v, want FORBIDDEN_INTERNAL_CONTEXT", err)
+	}
+
+	// 也测试宽泛 glob: .coding-bridge/** 内部的 pattern
+	collector2 := NewCollector(root, []string{".coding-bridge/reports/*/summary.md"}, nil)
+	_, err = collector2.Collect()
+	if err == nil {
+		t.Fatal("Collect() with glob error = nil, want FORBIDDEN_INTERNAL_CONTEXT")
+	}
+	if !strings.Contains(err.Error(), ErrForbiddenInternalContext) {
+		t.Fatalf("glob error = %v, want FORBIDDEN_INTERNAL_CONTEXT", err)
+	}
+}

@@ -87,27 +87,27 @@ type Decision struct {
 
 // VerifyResult 验证结果
 type VerifyResult struct {
-	Ran      bool     `json:"ran"`
-	Passed   bool     `json:"passed"`
-	Command  string   `json:"command,omitempty"`
-	ExitCode int      `json:"exit_code"`
+	Ran       bool     `json:"ran"`
+	Passed    bool     `json:"passed"`
+	Command   string   `json:"command,omitempty"`
+	ExitCode  int      `json:"exit_code"`
 	ErrorTail []string `json:"error_tail,omitempty"`
 }
 
 // StateReport 轻量状态报告 (state.json)
 type StateReport struct {
-	TaskID   string `json:"task_id"`
-	Status   string `json:"status"`
-	Phase    string `json:"phase,omitempty"`
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+	Phase  string `json:"phase,omitempty"`
 
-	WriteState    *WriteState       `json:"write_state,omitempty"`
-	Files         *StateFiles       `json:"files,omitempty"`
-	Verification  *StateVerification `json:"verification,omitempty"`
-	Failure       *FailureInfo      `json:"failure,omitempty"`
-	Rollback      *RollbackInfo     `json:"rollback,omitempty"`
-	Usage         *StateUsage       `json:"usage,omitempty"`
-	Artifacts     map[string]string `json:"artifacts,omitempty"`
-	Decision      *Decision         `json:"decision,omitempty"`
+	WriteState   *WriteState        `json:"write_state,omitempty"`
+	Files        *StateFiles        `json:"files,omitempty"`
+	Verification *StateVerification `json:"verification,omitempty"`
+	Failure      *FailureInfo       `json:"failure,omitempty"`
+	Rollback     *RollbackInfo      `json:"rollback,omitempty"`
+	Usage        *StateUsage        `json:"usage,omitempty"`
+	Artifacts    map[string]string  `json:"artifacts,omitempty"`
+	Decision     *Decision          `json:"decision,omitempty"`
 }
 
 // StateFiles 文件状态
@@ -119,10 +119,10 @@ type StateFiles struct {
 
 // StateVerification 验证状态
 type StateVerification struct {
-	Build                *VerifyResult `json:"build,omitempty"`
-	Test                 *VerifyResult `json:"test,omitempty"`
-	TechnicalVerification string       `json:"technical_verification"`
-	BusinessAcceptance    string       `json:"business_acceptance"`
+	Build                 *VerifyResult `json:"build,omitempty"`
+	Test                  *VerifyResult `json:"test,omitempty"`
+	TechnicalVerification string        `json:"technical_verification"`
+	BusinessAcceptance    string        `json:"business_acceptance"`
 }
 
 // RollbackInfo 回滚信息
@@ -183,34 +183,41 @@ type ReportData struct {
 	StartedAt               time.Time
 	FinishedAt              time.Time
 	// 新增字段
-	Phase          string
-	FailureCode    string
-	FailurePhase   string
-	Retryable      bool
+	Phase           string
+	FailureCode     string
+	FailurePhase    string
+	Retryable       bool
 	SuggestedAction string
-	// Write state
-	SnapshotCreated        bool
-	ExecutionMode          string
-	ExecutionRoot          string
-	MergeRequired          bool
-	MainWorkspaceModified  bool
+
+	// 写入状态 —— 必须由 runner 显式传入，generator 不猜测
+	PatchGenerated   bool
+	PatchValidated   bool
+	SnapshotCreated  bool
+	PatchApplied     bool
+	CommandsExecuted bool
+	RolledBack       bool
+
+	ExecutionMode         string
+	ExecutionRoot         string
+	MergeRequired         bool
+	MainWorkspaceModified bool
 }
 
 // ReportConfig 报告生成配置
 type ReportConfig struct {
-	OutputDir                string
-	Mode                     string // summary, full
-	SaveFullReport           bool
-	SaveFullPatch            bool
-	SaveFullCommandOutput    bool
-	CommandOutputTailLines   int
-	MaxSummaryBytes          int
-	MaxFailureMessageBytes   int
+	OutputDir                  string
+	Mode                       string // summary, full
+	SaveFullReport             bool
+	SaveFullPatch              bool
+	SaveFullCommandOutput      bool
+	CommandOutputTailLines     int
+	MaxSummaryBytes            int
+	MaxFailureMessageBytes     int
 	IncludeModifiedFileContent bool
-	IncludeDiff              bool
-	IncludePatch             bool
-	IncludeBackupContent     bool
-	IncludeSnapshotContent   bool
+	IncludeDiff                bool
+	IncludePatch               bool
+	IncludeBackupContent       bool
+	IncludeSnapshotContent     bool
 }
 
 // Generator 报告生成器
@@ -300,22 +307,23 @@ func (g *Generator) SaveReport(data *ReportData) (string, error) {
 func (g *Generator) saveStateReport(path string, data *ReportData) error {
 	isCompleted := strings.EqualFold(data.Status, "completed")
 
-	// 构建 write_state
+	// 构建 write_state —— 优先使用 runner 显式传入的字段
 	ws := &WriteState{
-		PatchGenerated:        true,
-		PatchValidated:        data.TechnicalVerification != "NOT_STARTED",
+		PatchGenerated:        data.PatchGenerated,
+		PatchValidated:        data.PatchValidated,
 		SnapshotCreated:       data.SnapshotCreated,
-		PatchApplied:          data.PatchEffectVerified,
+		PatchApplied:          data.PatchApplied,
 		PatchEffectVerified:   data.PatchEffectVerified,
-		CommandsExecuted:      len(data.CommandsRun) > 0,
-		RolledBack:            !isCompleted && data.RollbackInfo != "",
+		CommandsExecuted:      data.CommandsExecuted,
+		RolledBack:            data.RolledBack,
 		MainWorkspaceModified: data.MainWorkspaceModified,
 		ExecutionMode:         data.ExecutionMode,
 		ExecutionRoot:         data.ExecutionRoot,
 		MergeRequired:         data.MergeRequired,
 	}
+	// 保守 fallback
 	if ws.ExecutionMode == "" {
-		ws.ExecutionMode = "git_worktree"
+		ws.ExecutionMode = "unknown"
 	}
 
 	// 构建 verification
@@ -396,9 +404,9 @@ func (g *Generator) saveStateReport(path string, data *ReportData) error {
 		ControllerObservedTokens: controllerObserved,
 		ControllerUsageSource:    controllerSource,
 		ControllerUsage: &ControllerUsage{
-			Source:          controllerSource,
-			ObservedTokens:  controllerObserved,
-			Confidence:      "low",
+			Source:         controllerSource,
+			ObservedTokens: controllerObserved,
+			Confidence:     "low",
 		},
 	}
 
@@ -436,10 +444,10 @@ func (g *Generator) saveStateReport(path string, data *ReportData) error {
 	}
 
 	report := &StateReport{
-		TaskID:       data.TaskID,
-		Status:       data.Status,
-		Phase:        data.Phase,
-		WriteState:   ws,
+		TaskID:     data.TaskID,
+		Status:     data.Status,
+		Phase:      data.Phase,
+		WriteState: ws,
 		Files: &StateFiles{
 			ModifiedFiles:         data.ModifiedFiles,
 			EffectiveChangedFiles: data.EffectiveChangedFiles,

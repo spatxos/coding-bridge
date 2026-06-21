@@ -161,21 +161,21 @@ type EncodingSection struct {
 
 // ReportSection 报告配置
 type ReportSection struct {
-	OutputDir                string `yaml:"output_dir" json:"output_dir"`
-	Format                   string `yaml:"format" json:"format"`     // markdown, json
-	MaxHistory               int    `yaml:"max_history" json:"max_history"`
-	Mode                     string `yaml:"mode" json:"mode"`         // summary, full
-	SaveFullReport           bool   `yaml:"save_full_report" json:"save_full_report"`
-	SaveFullPatch            bool   `yaml:"save_full_patch" json:"save_full_patch"`
-	SaveFullCommandOutput    bool   `yaml:"save_full_command_output" json:"save_full_command_output"`
-	CommandOutputTailLines   int    `yaml:"command_output_tail_lines" json:"command_output_tail_lines"`
-	MaxSummaryBytes          int    `yaml:"max_summary_bytes" json:"max_summary_bytes"`
-	MaxFailureMessageBytes   int    `yaml:"max_failure_message_bytes" json:"max_failure_message_bytes"`
-	IncludeModifiedFileContent bool `yaml:"include_modified_file_content" json:"include_modified_file_content"`
-	IncludeDiff              bool   `yaml:"include_diff" json:"include_diff"`
-	IncludePatch             bool   `yaml:"include_patch" json:"include_patch"`
-	IncludeBackupContent     bool   `yaml:"include_backup_content" json:"include_backup_content"`
-	IncludeSnapshotContent   bool   `yaml:"include_snapshot_content" json:"include_snapshot_content"`
+	OutputDir                  string `yaml:"output_dir" json:"output_dir"`
+	Format                     string `yaml:"format" json:"format"` // markdown, json
+	MaxHistory                 int    `yaml:"max_history" json:"max_history"`
+	Mode                       string `yaml:"mode" json:"mode"` // summary, full
+	SaveFullReport             bool   `yaml:"save_full_report" json:"save_full_report"`
+	SaveFullPatch              bool   `yaml:"save_full_patch" json:"save_full_patch"`
+	SaveFullCommandOutput      bool   `yaml:"save_full_command_output" json:"save_full_command_output"`
+	CommandOutputTailLines     int    `yaml:"command_output_tail_lines" json:"command_output_tail_lines"`
+	MaxSummaryBytes            int    `yaml:"max_summary_bytes" json:"max_summary_bytes"`
+	MaxFailureMessageBytes     int    `yaml:"max_failure_message_bytes" json:"max_failure_message_bytes"`
+	IncludeModifiedFileContent bool   `yaml:"include_modified_file_content" json:"include_modified_file_content"`
+	IncludeDiff                bool   `yaml:"include_diff" json:"include_diff"`
+	IncludePatch               bool   `yaml:"include_patch" json:"include_patch"`
+	IncludeBackupContent       bool   `yaml:"include_backup_content" json:"include_backup_content"`
+	IncludeSnapshotContent     bool   `yaml:"include_snapshot_content" json:"include_snapshot_content"`
 }
 
 // WebSection Web 服务配置
@@ -195,8 +195,8 @@ type ExecutionSection struct {
 	MaxContextBytes    int     `yaml:"max_context_bytes" json:"max_context_bytes"`
 	MaxPatchLines      int     `yaml:"max_patch_lines" json:"max_patch_lines"`
 	// Task text budget limits
-	MaxDescriptionChars       int `yaml:"max_description_chars" json:"max_description_chars"`
-	MaxRequirementsChars      int `yaml:"max_requirements_chars" json:"max_requirements_chars"`
+	MaxDescriptionChars        int `yaml:"max_description_chars" json:"max_description_chars"`
+	MaxRequirementsChars       int `yaml:"max_requirements_chars" json:"max_requirements_chars"`
 	MaxAcceptanceCriteriaChars int `yaml:"max_acceptance_criteria_chars" json:"max_acceptance_criteria_chars"`
 	MaxAcceptanceCriteriaCount int `yaml:"max_acceptance_criteria_count" json:"max_acceptance_criteria_count"`
 	MaxRequirementsCount       int `yaml:"max_requirements_count" json:"max_requirements_count"`
@@ -306,21 +306,21 @@ func DefaultConfig() *AppConfig {
 			FallbackEncoding:             []string{"utf-8-sig", "gbk", "gb2312"},
 		},
 		Report: ReportSection{
-			OutputDir:                 ".coding-bridge/reports",
-			Format:                    "markdown",
-			MaxHistory:                50,
-			Mode:                      "summary",
-			SaveFullReport:            false,
-			SaveFullPatch:             false,
-			SaveFullCommandOutput:     false,
-			CommandOutputTailLines:    120,
-			MaxSummaryBytes:           8192,
-			MaxFailureMessageBytes:    4096,
+			OutputDir:                  ".coding-bridge/reports",
+			Format:                     "markdown",
+			MaxHistory:                 50,
+			Mode:                       "summary",
+			SaveFullReport:             false,
+			SaveFullPatch:              false,
+			SaveFullCommandOutput:      false,
+			CommandOutputTailLines:     120,
+			MaxSummaryBytes:            8192,
+			MaxFailureMessageBytes:     4096,
 			IncludeModifiedFileContent: false,
-			IncludeDiff:               false,
-			IncludePatch:              false,
-			IncludeBackupContent:      false,
-			IncludeSnapshotContent:    false,
+			IncludeDiff:                false,
+			IncludePatch:               false,
+			IncludeBackupContent:       false,
+			IncludeSnapshotContent:     false,
 		},
 		Web: WebSection{
 			Enabled: false,

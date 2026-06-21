@@ -108,28 +108,28 @@ type TaskTransaction struct {
 
 // ControllerUsage Controller 的 token 使用信息
 type ControllerUsage struct {
-	Source              string `json:"source"`               // manual, compliance_api, estimated, unavailable
-	ObservedTokens      *int   `json:"observed_tokens"`      // 真实观测值，可能为 null
-	EstimatedTokensMin  int    `json:"estimated_tokens_min"` // 估算最小值
-	EstimatedTokensMax  int    `json:"estimated_tokens_max"` // 估算最大值
-	InputChars          int    `json:"input_chars"`          // 输入字符数
-	OutputChars         int    `json:"output_chars"`         // 输出字符数
-	Confidence          string `json:"confidence"`           // low, medium, high
+	Source             string `json:"source"`               // manual, compliance_api, estimated, unavailable
+	ObservedTokens     *int   `json:"observed_tokens"`      // 真实观测值，可能为 null
+	EstimatedTokensMin int    `json:"estimated_tokens_min"` // 估算最小值
+	EstimatedTokensMax int    `json:"estimated_tokens_max"` // 估算最大值
+	InputChars         int    `json:"input_chars"`          // 输入字符数
+	OutputChars        int    `json:"output_chars"`         // 输出字符数
+	Confidence         string `json:"confidence"`           // low, medium, high
 }
 
 // WriteState 写入状态摘要
 type WriteState struct {
-	PatchGenerated     bool   `json:"patch_generated"`
-	PatchValidated     bool   `json:"patch_validated"`
-	SnapshotCreated    bool   `json:"snapshot_created"`
-	PatchApplied       bool   `json:"patch_applied"`
-	PatchEffectVerified bool  `json:"patch_effect_verified"`
-	CommandsExecuted   bool   `json:"commands_executed"`
-	RolledBack         bool   `json:"rolled_back"`
-	MainWorkspaceModified bool `json:"main_workspace_modified"`
-	ExecutionMode      string `json:"execution_mode"`
-	ExecutionRoot      string `json:"execution_root"`
-	MergeRequired      bool   `json:"merge_required"`
+	PatchGenerated        bool   `json:"patch_generated"`
+	PatchValidated        bool   `json:"patch_validated"`
+	SnapshotCreated       bool   `json:"snapshot_created"`
+	PatchApplied          bool   `json:"patch_applied"`
+	PatchEffectVerified   bool   `json:"patch_effect_verified"`
+	CommandsExecuted      bool   `json:"commands_executed"`
+	RolledBack            bool   `json:"rolled_back"`
+	MainWorkspaceModified bool   `json:"main_workspace_modified"`
+	ExecutionMode         string `json:"execution_mode"`
+	ExecutionRoot         string `json:"execution_root"`
+	MergeRequired         bool   `json:"merge_required"`
 }
 
 // FailureInfo 失败信息
@@ -186,11 +186,32 @@ type TaskResult struct {
 	RollbackInfo            string                    `json:"rollback_info,omitempty"`
 	StartedAt               time.Time                 `json:"started_at"`
 	FinishedAt              time.Time                 `json:"finished_at"`
-	// 新增轻量状态字段
-	WriteState_           *WriteState      `json:"write_state,omitempty"`
-	Failure               *FailureInfo     `json:"failure,omitempty"`
-	ControllerUsage_      *ControllerUsage `json:"controller_usage,omitempty"`
-	Decision_             *Decision        `json:"decision,omitempty"`
+
+	// 明确的失败信息
+	FailureCode     string `json:"failure_code,omitempty"`
+	FailurePhase    string `json:"failure_phase,omitempty"`
+	Retryable       bool   `json:"retryable"`
+	SuggestedAction string `json:"suggested_action,omitempty"`
+
+	// 写入状态 —— 由 runner 在各阶段显式设置，不允许 generator 猜测
+	PatchGenerated   bool `json:"patch_generated"`
+	PatchValidated   bool `json:"patch_validated"`
+	SnapshotCreated  bool `json:"snapshot_created"`
+	PatchApplied     bool `json:"patch_applied"`
+	CommandsExecuted bool `json:"commands_executed"`
+	RolledBack       bool `json:"rolled_back"`
+
+	// 执行位置与合并信息
+	ExecutionMode         string `json:"execution_mode,omitempty"`
+	ExecutionRoot         string `json:"execution_root,omitempty"`
+	MergeRequired         bool   `json:"merge_required"`
+	MainWorkspaceModified bool   `json:"main_workspace_modified"`
+
+	// 结构化状态（向后兼容）
+	WriteState_      *WriteState      `json:"write_state,omitempty"`
+	Failure          *FailureInfo     `json:"failure,omitempty"`
+	ControllerUsage_ *ControllerUsage `json:"controller_usage,omitempty"`
+	Decision_        *Decision        `json:"decision,omitempty"`
 	// 轻量 artifact 路径
 	Artifacts map[string]string `json:"artifacts,omitempty"`
 }

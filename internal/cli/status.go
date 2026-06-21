@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -190,6 +191,15 @@ var tokenRowPattern = regexp.MustCompile(`\| Token \| prompt (\d+) / completion 
 var statusValuePattern = regexp.MustCompile(`\*\*(completed|failed|rolled_back|cancelled)\*\*`)
 
 func printReportStats(reports []string) error {
+	// 优先尝试新结构 state.json
+	reportsDir := filepath.Dir(reports[0])
+	if reportsDir == "" || len(reports) == 0 {
+		// 无法确定目录
+	} else if err := printStateReportStats(reportsDir); err == nil {
+		return nil
+	}
+
+	// 回退到旧的 flat markdown 格式
 	var totalTokens int64
 	var effectiveTokens int64
 	var wastedTokens int64
@@ -225,7 +235,7 @@ func printReportStats(reports []string) error {
 	if totalTokens > 0 {
 		wasteRate = float64(wastedTokens) / float64(totalTokens) * 100
 	}
-	fmt.Println("coding-bridge Executor usage statistics")
+	fmt.Println("coding-bridge Executor usage statistics (from flat reports)")
 	fmt.Printf("  Reports with provider usage: %d\n", measured)
 	fmt.Printf("  Completed attempts: %d\n", completed)
 	fmt.Printf("  Failed/non-completed attempts: %d\n", failed)
@@ -234,6 +244,87 @@ func printReportStats(reports []string) error {
 	fmt.Printf("  Wasted-attempt tokens: %d\n", wastedTokens)
 	fmt.Printf("  Attempt waste rate: %.2f%%\n", wasteRate)
 	fmt.Println("  Note: effective-attempt means the bridge completed its technical gates; business acceptance still requires Controller review.")
+	return nil
+}
+
+// stateReportSummary 从 state.json 解析到的简单汇总
+type stateReportSummary struct {
+	Status string `json:"status"`
+	Usage  struct {
+		ExecutorTotalTokens     int     `json:"executor_total_tokens"`
+		ExecutorEffectiveTokens int     `json:"executor_effective_tokens"`
+		ExecutorWastedTokens    int     `json:"executor_wasted_tokens"`
+		ExecutorWasteRate       float64 `json:"executor_waste_rate"`
+		ControllerUsageSource   string  `json:"controller_usage_source"`
+	} `json:"usage"`
+}
+
+// printStateReportStats 遍历 .coding-bridge/reports/*/state.json 做统计
+func printStateReportStats(reportsDir string) error {
+	entries, err := os.ReadDir(reportsDir)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("reports dir not found")
+	}
+	if err != nil {
+		return err
+	}
+
+	var totalTokens, effectiveTokens, wastedTokens int64
+	var completed, failed int
+	anyFound := false
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		statePath := filepath.Join(reportsDir, entry.Name(), "state.json")
+		content, err := os.ReadFile(statePath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			continue
+		}
+
+		var s stateReportSummary
+		if err := json.Unmarshal(content, &s); err != nil {
+			continue
+		}
+		anyFound = true
+
+		totalTokens += int64(s.Usage.ExecutorTotalTokens)
+		if strings.EqualFold(s.Status, "completed") {
+			completed++
+			effectiveTokens += int64(s.Usage.ExecutorEffectiveTokens)
+		} else {
+			failed++
+			wastedTokens += int64(s.Usage.ExecutorWastedTokens)
+		}
+	}
+
+	if !anyFound {
+		return fmt.Errorf("no state.json reports found")
+	}
+
+	wasteRate := 0.0
+	if totalTokens > 0 {
+		wasteRate = float64(wastedTokens) / float64(totalTokens) * 100
+	}
+
+	fmt.Println("Report stats:")
+	fmt.Println()
+	fmt.Println("Tasks:")
+	fmt.Printf("  - completed: %d\n", completed)
+	fmt.Printf("  - failed: %d\n", failed)
+	fmt.Println()
+	fmt.Println("Executor tokens:")
+	fmt.Printf("  - total: %d\n", totalTokens)
+	fmt.Printf("  - effective: %d\n", effectiveTokens)
+	fmt.Printf("  - wasted: %d\n", wastedTokens)
+	fmt.Printf("  - waste rate: %.2f%%\n", wasteRate)
+	fmt.Println()
+	fmt.Println("Controller tokens:")
+	fmt.Println("  - observed: unavailable")
 	return nil
 }
 

@@ -231,8 +231,10 @@ Codex 将按以下顺序工作：
 2. 创建 `.coding-bridge/tasks/<task-id>.json`
 3. 先运行 `coding-bridge run ... --dry-run`
 4. 再运行真实任务，由 DeepSeek 生成 patch
-5. 读取 `coding-bridge report <task-id>`
-6. 汇报修改文件、测试结果、token 用量、报告路径和回滚命令
+5. 先读取 `coding-bridge status <task-id> --json`
+6. 再读取 `coding-bridge report <task-id>`（默认输出 summary）
+7. 只有失败排查时，才读取 full report / patch / command log
+8. 汇报修改文件、测试结果、token 用量、报告路径和回滚命令
 
 如果项目是干净的 Git 仓库，修改会保留在独立 worktree 中等待审查。Codex
 会报告 worktree 路径，不会在未获得明确批准时自动合并到主工作区。
