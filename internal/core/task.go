@@ -70,8 +70,9 @@ type Task struct {
 
 // ControllerConfig Controller 模型配置
 type ControllerConfig struct {
-	Provider string `json:"provider" yaml:"provider"`
-	Model    string `json:"model" yaml:"model"`
+	Provider       string `json:"provider" yaml:"provider"`
+	Model          string `json:"model" yaml:"model"`
+	ObservedTokens int    `json:"observed_tokens,omitempty" yaml:"observed_tokens,omitempty"`
 }
 
 // ExecutorConfig Executor 模型配置
@@ -107,25 +108,47 @@ type TaskTransaction struct {
 
 // TaskResult 任务执行结果
 type TaskResult struct {
-	TaskID           string                    `json:"task_id"`
-	Status           TaskState                 `json:"status"`
-	Provider         string                    `json:"provider,omitempty"`
-	Model            string                    `json:"model,omitempty"`
-	ContextFiles     int                       `json:"context_files"`
-	ContextBytes     int                       `json:"context_bytes"`
-	PromptTokens     int                       `json:"prompt_tokens"`
-	CompletionTokens int                       `json:"completion_tokens"`
-	TotalTokens      int                       `json:"total_tokens"`
-	ModifiedFiles    []string                  `json:"modified_files"`
-	GitDiff          string                    `json:"git_diff"`
-	CommandsRun      []commands.CommandResult  `json:"commands_run"`
-	BuildResult      *commands.BuildTestResult `json:"build_result,omitempty"`
-	TestResult       *commands.BuildTestResult `json:"test_result,omitempty"`
-	SecurityCheck    *SecurityCheckResult      `json:"security_check,omitempty"`
-	FailureReason    string                    `json:"failure_reason,omitempty"`
-	RollbackInfo     string                    `json:"rollback_info,omitempty"`
-	StartedAt        time.Time                 `json:"started_at"`
-	FinishedAt       time.Time                 `json:"finished_at"`
+	TaskID                  string                    `json:"task_id"`
+	Status                  TaskState                 `json:"status"`
+	Provider                string                    `json:"provider,omitempty"`
+	Model                   string                    `json:"model,omitempty"`
+	ContextFiles            int                       `json:"context_files"`
+	ContextBytes            int                       `json:"context_bytes"`
+	PromptTokens            int                       `json:"prompt_tokens"`
+	CompletionTokens        int                       `json:"completion_tokens"`
+	TotalTokens             int                       `json:"total_tokens"`
+	ControllerTokens        int                       `json:"controller_tokens,omitempty"`
+	EstimatedDirectTokens   int                       `json:"estimated_direct_tokens,omitempty"`
+	EstimatedGrossSavings   int                       `json:"estimated_gross_savings,omitempty"`
+	EstimatedNetSavings     int                       `json:"estimated_net_savings,omitempty"`
+	TruncatedOutput         bool                      `json:"truncated_output"`
+	PatchEffectVerified     bool                      `json:"patch_effect_verified"`
+	EffectiveChangedFiles   int                       `json:"effective_changed_files"`
+	GenerationAttempts      int                       `json:"generation_attempts"`
+	MaxRepairAttempts       int                       `json:"max_repair_attempts"`
+	PatchChangedLines       int                       `json:"patch_changed_lines"`
+	ExecutorEffectiveTokens int                       `json:"executor_effective_tokens"`
+	ExecutorWastedTokens    int                       `json:"executor_wasted_tokens"`
+	ExecutorWasteRate       float64                   `json:"executor_waste_rate"`
+	FileHashChanges         []FileHashChange          `json:"file_hash_changes,omitempty"`
+	TechnicalVerification   string                    `json:"technical_verification"`
+	BusinessAcceptance      string                    `json:"business_acceptance"`
+	ModifiedFiles           []string                  `json:"modified_files"`
+	GitDiff                 string                    `json:"git_diff"`
+	CommandsRun             []commands.CommandResult  `json:"commands_run"`
+	BuildResult             *commands.BuildTestResult `json:"build_result,omitempty"`
+	TestResult              *commands.BuildTestResult `json:"test_result,omitempty"`
+	SecurityCheck           *SecurityCheckResult      `json:"security_check,omitempty"`
+	FailureReason           string                    `json:"failure_reason,omitempty"`
+	RollbackInfo            string                    `json:"rollback_info,omitempty"`
+	StartedAt               time.Time                 `json:"started_at"`
+	FinishedAt              time.Time                 `json:"finished_at"`
+}
+
+type FileHashChange struct {
+	File         string `json:"file"`
+	BeforeSHA256 string `json:"before_sha256"`
+	AfterSHA256  string `json:"after_sha256"`
 }
 
 // SecurityCheckResult 安全检查结果

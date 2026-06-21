@@ -11,6 +11,17 @@ import (
 	"strings"
 )
 
+const EndMarker = "END_CODING_BRIDGE_EDIT"
+
+func HasEndMarker(input string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(input, "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(line) == EndMarker {
+			return true
+		}
+	}
+	return false
+}
+
 // DiffFile 表示一个文件的 diff 信息
 type DiffFile struct {
 	OrigPath string // 原始文件路径
@@ -54,6 +65,7 @@ var (
 
 // Parse 解析 unified diff 文本
 func (p *Parser) Parse(diffText string) (*ParseResult, error) {
+	diffText = extractUnifiedDiff(diffText)
 	result := &ParseResult{RawDiff: diffText}
 	scanner := bufio.NewScanner(strings.NewReader(diffText))
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
@@ -137,6 +149,9 @@ func (p *Parser) Parse(diffText string) (*ParseResult, error) {
 			currentFile.Hunks = append(currentFile.Hunks, hunk)
 			continue
 		}
+		if strings.HasPrefix(line, "@@") {
+			return nil, fmt.Errorf("invalid hunk header %q", line)
+		}
 
 		// hunk 内容行
 		if currentFile != nil && len(currentFile.Hunks) > 0 {
@@ -158,8 +173,65 @@ func (p *Parser) Parse(diffText string) (*ParseResult, error) {
 	if len(result.Files) == 0 {
 		return nil, fmt.Errorf("no valid diff found in input")
 	}
+	for _, file := range result.Files {
+		if len(file.Hunks) == 0 && !file.IsRename {
+			return nil, fmt.Errorf(
+				"diff for %q contains no valid hunks",
+				file.NewPath,
+			)
+		}
+	}
+	normalizeHunkCounts(result)
 
 	return result, nil
+}
+
+func normalizeHunkCounts(result *ParseResult) {
+	for fileIndex := range result.Files {
+		for hunkIndex := range result.Files[fileIndex].Hunks {
+			hunk := &result.Files[fileIndex].Hunks[hunkIndex]
+			origLines := 0
+			newLines := 0
+			for _, line := range hunk.Lines {
+				switch {
+				case strings.HasPrefix(line, " "):
+					origLines++
+					newLines++
+				case strings.HasPrefix(line, "-"):
+					origLines++
+				case strings.HasPrefix(line, "+"):
+					newLines++
+				}
+			}
+			hunk.OrigLines = origLines
+			hunk.NewLines = newLines
+		}
+	}
+}
+
+func extractUnifiedDiff(input string) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(input), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "diff --git ") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return normalized
+	}
+
+	end := len(lines)
+	for i := start; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "```" || trimmed == EndMarker {
+			end = i
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
 }
 
 func parseInt(s string) int {
@@ -428,6 +500,13 @@ func (a *Applier) applyHunks(original string, hunks []Hunk) (string, error) {
 			return "", fmt.Errorf("invalid hunk original start line %d", hunk.OrigStart)
 		}
 		hunkOrigStart := hunk.OrigStart - 1 // 转为 0-based
+		if !hunkMatchesAt(origLines, hunk, hunkOrigStart) {
+			matchedStart, err := findHunkStart(origLines, hunk, origIdx)
+			if err != nil {
+				return "", err
+			}
+			hunkOrigStart = matchedStart
+		}
 		if hunkOrigStart < origIdx || hunkOrigStart > len(origLines) {
 			return "", fmt.Errorf("hunk starts outside original file at line %d", hunk.OrigStart)
 		}
@@ -444,16 +523,16 @@ func (a *Applier) applyHunks(original string, hunks []Hunk) (string, error) {
 			switch {
 			case strings.HasPrefix(line, " "):
 				expected := line[1:]
-				if origIdx >= len(origLines) || origLines[origIdx] != expected {
+				if origIdx >= len(origLines) || !patchLineEquivalent(origLines[origIdx], expected) {
 					return "", fmt.Errorf("context mismatch at original line %d", origIdx+1)
 				}
-				result = append(result, expected)
+				result = append(result, origLines[origIdx])
 				origIdx++
 				origCount++
 				newCount++
 			case strings.HasPrefix(line, "-"):
 				expected := line[1:]
-				if origIdx >= len(origLines) || origLines[origIdx] != expected {
+				if origIdx >= len(origLines) || !patchLineEquivalent(origLines[origIdx], expected) {
 					return "", fmt.Errorf("removed line mismatch at original line %d", origIdx+1)
 				}
 				origIdx++
@@ -485,6 +564,63 @@ func (a *Applier) applyHunks(original string, hunks []Hunk) (string, error) {
 	}
 
 	return strings.Join(result, lineEnding), nil
+}
+
+func hunkOriginalLines(hunk Hunk) []string {
+	var expected []string
+	for _, line := range hunk.Lines {
+		switch {
+		case strings.HasPrefix(line, " "), strings.HasPrefix(line, "-"):
+			expected = append(expected, line[1:])
+		case strings.HasPrefix(line, "+"), line == `\ No newline at end of file`:
+			continue
+		}
+	}
+	return expected
+}
+
+func hunkMatchesAt(original []string, hunk Hunk, start int) bool {
+	expected := hunkOriginalLines(hunk)
+	if start < 0 || start+len(expected) > len(original) {
+		return false
+	}
+	for i, line := range expected {
+		if !patchLineEquivalent(original[start+i], line) {
+			return false
+		}
+	}
+	return true
+}
+
+func patchLineEquivalent(original, expected string) bool {
+	return original == expected ||
+		(strings.TrimSpace(original) == "" && strings.TrimSpace(expected) == "")
+}
+
+func findHunkStart(original []string, hunk Hunk, minimumStart int) (int, error) {
+	expected := hunkOriginalLines(hunk)
+	if len(expected) == 0 {
+		return 0, fmt.Errorf("cannot relocate hunk without original context")
+	}
+
+	var matches []int
+	for start := minimumStart; start+len(expected) <= len(original); start++ {
+		if hunkMatchesAt(original, hunk, start) {
+			matches = append(matches, start)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return 0, fmt.Errorf("hunk context not found (declared original line %d)", hunk.OrigStart)
+	case 1:
+		return matches[0], nil
+	default:
+		return 0, fmt.Errorf(
+			"hunk context is ambiguous: %d matches found (declared original line %d)",
+			len(matches),
+			hunk.OrigStart,
+		)
+	}
 }
 
 // QuickValidate 快速检查响应是否是有效的 unified diff

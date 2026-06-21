@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/coding-bridge/internal/config"
 	"github.com/coding-bridge/internal/web"
@@ -10,7 +9,8 @@ import (
 )
 
 var (
-	webPort int
+	webPort    int
+	webProject string
 )
 
 var webCmd = &cobra.Command{
@@ -20,9 +20,9 @@ var webCmd = &cobra.Command{
 
 默认地址: http://127.0.0.1:8765`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectRoot, err := os.Getwd()
+		projectRoot, err := resolveProjectRoot(webProject)
 		if err != nil {
-			return fmt.Errorf("获取当前目录失败: %w", err)
+			return fmt.Errorf("确定项目根目录失败: %w", err)
 		}
 
 		loader := config.NewLoader(projectRoot)
@@ -52,6 +52,9 @@ var webCmd = &cobra.Command{
 		fmt.Println("║                                                  ║")
 		fmt.Println("╚══════════════════════════════════════════════════╝")
 		fmt.Println()
+		fmt.Printf("项目根目录: %s\n", projectRoot)
+		fmt.Printf("配置文件: %s\n", loader.ConfigPath())
+		fmt.Println()
 
 		web.OpenBrowser(url)
 		fmt.Println("📂 正在尝试自动打开浏览器...")
@@ -63,4 +66,5 @@ var webCmd = &cobra.Command{
 
 func init() {
 	webCmd.Flags().IntVar(&webPort, "port", 8765, "Web 服务器端口")
+	webCmd.Flags().StringVar(&webProject, "project", "", "项目根目录；默认从当前目录向上查找 .coding-bridge 或 .git")
 }

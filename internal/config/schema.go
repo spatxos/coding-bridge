@@ -38,6 +38,15 @@ type AppConfig struct {
 
 	// Web 服务配置
 	Web WebSection `yaml:"web" json:"web"`
+
+	// Executor 执行参数
+	Execution ExecutionSection `yaml:"execution" json:"execution"`
+
+	// Codex 接入策略
+	Codex CodexSection `yaml:"codex" json:"codex"`
+
+	// Token 统计与节省估算
+	TokenAccounting TokenAccountingSection `yaml:"token_accounting" json:"token_accounting"`
 }
 
 // ProviderSection Provider 相关配置
@@ -165,10 +174,32 @@ type WebSection struct {
 	Token   string `yaml:"token,omitempty" json:"token,omitempty"`
 }
 
+type ExecutionSection struct {
+	PatchMaxTokens     int     `yaml:"patch_max_tokens" json:"patch_max_tokens"`
+	Temperature        float64 `yaml:"temperature" json:"temperature"`
+	MaxRepairAttempts  int     `yaml:"max_repair_attempts" json:"max_repair_attempts"`
+	EnforceTaskBudgets bool    `yaml:"enforce_task_budgets" json:"enforce_task_budgets"`
+	MaxTaskFiles       int     `yaml:"max_task_files" json:"max_task_files"`
+	MaxContextBytes    int     `yaml:"max_context_bytes" json:"max_context_bytes"`
+	MaxPatchLines      int     `yaml:"max_patch_lines" json:"max_patch_lines"`
+}
+
+type CodexSection struct {
+	CLIEnabled                   bool `yaml:"cli_enabled" json:"cli_enabled"`
+	DefaultCLIForCodingTasks     bool `yaml:"default_cli_for_coding_tasks" json:"default_cli_for_coding_tasks"`
+	FallbackToCodexOnUnavailable bool `yaml:"fallback_to_codex_on_unavailable" json:"fallback_to_codex_on_unavailable"`
+	ExternalCodeSharingApproved  bool `yaml:"external_code_sharing_approved" json:"external_code_sharing_approved"`
+}
+
+type TokenAccountingSection struct {
+	Enabled                  bool    `yaml:"enabled" json:"enabled"`
+	DirectCodexBaselineRatio float64 `yaml:"direct_codex_baseline_ratio" json:"direct_codex_baseline_ratio"`
+}
+
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *AppConfig {
 	return &AppConfig{
-		Version: 1,
+		Version: 5,
 		Providers: ProviderSection{
 			DefaultController: "openai",
 			DefaultExecutor:   "deepseek",
@@ -266,6 +297,25 @@ func DefaultConfig() *AppConfig {
 			Host:    "127.0.0.1",
 			Port:    8765,
 		},
+		Execution: ExecutionSection{
+			PatchMaxTokens:     16384,
+			Temperature:        0.1,
+			MaxRepairAttempts:  2,
+			EnforceTaskBudgets: true,
+			MaxTaskFiles:       3,
+			MaxContextBytes:    49152,
+			MaxPatchLines:      200,
+		},
+		Codex: CodexSection{
+			CLIEnabled:                   true,
+			DefaultCLIForCodingTasks:     true,
+			FallbackToCodexOnUnavailable: true,
+			ExternalCodeSharingApproved:  true,
+		},
+		TokenAccounting: TokenAccountingSection{
+			Enabled:                  true,
+			DirectCodexBaselineRatio: 3,
+		},
 	}
 }
 
@@ -321,6 +371,27 @@ func (c *AppConfig) Validate() []error {
 	}
 	if c.ProviderSelection.Mode != "auto" && c.ProviderSelection.Mode != "manual" {
 		errs = append(errs, fmt.Errorf("provider_selection.mode must be auto or manual"))
+	}
+	if c.Execution.PatchMaxTokens < 256 {
+		errs = append(errs, fmt.Errorf("execution.patch_max_tokens must be >= 256"))
+	}
+	if c.Execution.Temperature < 0 || c.Execution.Temperature > 2 {
+		errs = append(errs, fmt.Errorf("execution.temperature must be between 0 and 2"))
+	}
+	if c.Execution.MaxRepairAttempts < 0 || c.Execution.MaxRepairAttempts > 5 {
+		errs = append(errs, fmt.Errorf("execution.max_repair_attempts must be between 0 and 5"))
+	}
+	if c.Execution.MaxTaskFiles < 1 {
+		errs = append(errs, fmt.Errorf("execution.max_task_files must be >= 1"))
+	}
+	if c.Execution.MaxContextBytes < 1024 {
+		errs = append(errs, fmt.Errorf("execution.max_context_bytes must be >= 1024"))
+	}
+	if c.Execution.MaxPatchLines < 1 {
+		errs = append(errs, fmt.Errorf("execution.max_patch_lines must be >= 1"))
+	}
+	if c.TokenAccounting.DirectCodexBaselineRatio < 1 {
+		errs = append(errs, fmt.Errorf("token_accounting.direct_codex_baseline_ratio must be >= 1"))
 	}
 	switch c.Security.ForbiddenFileReadPolicy.Default {
 	case "deny", "ask", "allow":

@@ -41,4 +41,5 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(webCmd)
+	rootCmd.AddCommand(codexCmd)
 }

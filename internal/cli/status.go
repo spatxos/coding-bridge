@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/coding-bridge/internal/config"
@@ -13,12 +15,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var reportProject string
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "查看任务状态",
 	Long:  "查看当前项目的任务执行状态。",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectRoot, err := os.Getwd()
+		projectRoot, err := resolveProjectRoot(reportProject)
 		if err != nil {
 			return fmt.Errorf("获取当前目录失败: %w", err)
 		}
@@ -62,13 +66,16 @@ var reportCmd = &cobra.Command{
 			target = args[0]
 		}
 
-		projectRoot, err := os.Getwd()
+		projectRoot, err := resolveProjectRoot(reportProject)
 		if err != nil {
-			return fmt.Errorf("获取当前目录失败: %w", err)
+			return fmt.Errorf("确定项目根目录失败: %w", err)
 		}
 		reports, err := listFiles(filepath.Join(projectRoot, ".coding-bridge", "reports"), "-report.md")
 		if err != nil {
 			return err
+		}
+		if target == "stats" {
+			return printReportStats(reports)
 		}
 		reportPath, err := selectReport(reports, target)
 		if err != nil {
@@ -86,6 +93,57 @@ var reportCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+var tokenRowPattern = regexp.MustCompile(`\| Token \| prompt (\d+) / completion (\d+) / total (\d+) \|`)
+var statusValuePattern = regexp.MustCompile(`\*\*(completed|failed|rolled_back|cancelled)\*\*`)
+
+func printReportStats(reports []string) error {
+	var totalTokens int64
+	var effectiveTokens int64
+	var wastedTokens int64
+	var completed int
+	var failed int
+	var measured int
+	for _, reportPath := range reports {
+		content, err := os.ReadFile(reportPath)
+		if err != nil {
+			return fmt.Errorf("read report %s: %w", reportPath, err)
+		}
+		tokenMatch := tokenRowPattern.FindStringSubmatch(string(content))
+		if tokenMatch == nil {
+			continue
+		}
+		tokens, _ := strconv.ParseInt(tokenMatch[3], 10, 64)
+		statusMatch := statusValuePattern.FindStringSubmatch(string(content))
+		status := ""
+		if statusMatch != nil {
+			status = statusMatch[1]
+		}
+		totalTokens += tokens
+		measured++
+		if status == "completed" {
+			completed++
+			effectiveTokens += tokens
+		} else {
+			failed++
+			wastedTokens += tokens
+		}
+	}
+	wasteRate := 0.0
+	if totalTokens > 0 {
+		wasteRate = float64(wastedTokens) / float64(totalTokens) * 100
+	}
+	fmt.Println("coding-bridge Executor usage statistics")
+	fmt.Printf("  Reports with provider usage: %d\n", measured)
+	fmt.Printf("  Completed attempts: %d\n", completed)
+	fmt.Printf("  Failed/non-completed attempts: %d\n", failed)
+	fmt.Printf("  Total Executor tokens: %d\n", totalTokens)
+	fmt.Printf("  Effective-attempt tokens: %d\n", effectiveTokens)
+	fmt.Printf("  Wasted-attempt tokens: %d\n", wastedTokens)
+	fmt.Printf("  Attempt waste rate: %.2f%%\n", wasteRate)
+	fmt.Println("  Note: effective-attempt means the bridge completed its technical gates; business acceptance still requires Controller review.")
+	return nil
 }
 
 var rollbackCmd = &cobra.Command{
@@ -162,4 +220,8 @@ func selectReport(reports []string, target string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("未找到任务 %s 的报告", target)
+}
+
+func init() {
+	reportCmd.Flags().StringVar(&reportProject, "project", "", "项目根目录；默认从当前目录向上查找 .coding-bridge 或 .git")
 }

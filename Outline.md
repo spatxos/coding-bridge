@@ -1089,6 +1089,7 @@ coding-bridge config rollback
 
 coding-bridge doctor
 coding-bridge recover
+coding-bridge codex install       # 安装/更新项目 AGENTS.md 对话接入规则
 ```
 
 ---

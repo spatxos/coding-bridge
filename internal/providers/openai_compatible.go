@@ -119,16 +119,6 @@ func (p *OpenAICompatibleProvider) Generate(ctx context.Context, req *GenerateRe
 
 	apiURL := strings.TrimRight(p.config.BaseURL, "/") + "/chat/completions"
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	if p.config.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.config.APIKey)
-	}
-
 	// 重试逻辑
 	var lastErr error
 	var chatResp *openAIChatResponse
@@ -139,6 +129,15 @@ func (p *OpenAICompatibleProvider) Generate(ctx context.Context, req *GenerateRe
 				return nil, ctx.Err()
 			case <-time.After(time.Duration(attempt) * time.Second):
 			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if p.config.APIKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+p.config.APIKey)
 		}
 
 		chatResp, lastErr = p.doRequest(httpReq)

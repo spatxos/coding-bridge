@@ -35,27 +35,49 @@ type SecurityResult struct {
 	ForbiddenFilesAccessed bool
 }
 
+type FileHashChange struct {
+	File         string
+	BeforeSHA256 string
+	AfterSHA256  string
+}
+
 // ReportData 报告输入数据（不依赖 core 包）
 type ReportData struct {
-	TaskID           string
-	Status           string
-	Provider         string
-	Model            string
-	ContextFiles     int
-	ContextBytes     int
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	ModifiedFiles    []string
-	GitDiff          string
-	CommandsRun      []CmdResult
-	BuildResult      *BuildResult
-	TestResult       *BuildResult
-	SecurityCheck    *SecurityResult
-	FailureReason    string
-	RollbackInfo     string
-	StartedAt        time.Time
-	FinishedAt       time.Time
+	TaskID                  string
+	Status                  string
+	Provider                string
+	Model                   string
+	ContextFiles            int
+	ContextBytes            int
+	PromptTokens            int
+	CompletionTokens        int
+	TotalTokens             int
+	ControllerTokens        int
+	EstimatedDirectTokens   int
+	EstimatedGrossSavings   int
+	EstimatedNetSavings     int
+	TruncatedOutput         bool
+	PatchEffectVerified     bool
+	EffectiveChangedFiles   int
+	GenerationAttempts      int
+	MaxRepairAttempts       int
+	PatchChangedLines       int
+	ExecutorEffectiveTokens int
+	ExecutorWastedTokens    int
+	ExecutorWasteRate       float64
+	FileHashChanges         []FileHashChange
+	TechnicalVerification   string
+	BusinessAcceptance      string
+	ModifiedFiles           []string
+	GitDiff                 string
+	CommandsRun             []CmdResult
+	BuildResult             *BuildResult
+	TestResult              *BuildResult
+	SecurityCheck           *SecurityResult
+	FailureReason           string
+	RollbackInfo            string
+	StartedAt               time.Time
+	FinishedAt              time.Time
 }
 
 // Generator 报告生成器
@@ -91,6 +113,29 @@ func (g *Generator) GenerateMarkdown(data *ReportData) (string, error) {
 		sb.WriteString(fmt.Sprintf("| Token | prompt %d / completion %d / total %d |\n",
 			data.PromptTokens, data.CompletionTokens, data.TotalTokens))
 	}
+	if data.EstimatedDirectTokens > 0 {
+		sb.WriteString(fmt.Sprintf("| Direct Codex baseline (estimated) | %d tokens |\n", data.EstimatedDirectTokens))
+		if data.ControllerTokens > 0 {
+			sb.WriteString(fmt.Sprintf("| Controller tokens (observed) | %d |\n", data.ControllerTokens))
+			sb.WriteString(fmt.Sprintf("| Estimated net token savings | %d |\n", data.EstimatedNetSavings))
+		} else {
+			sb.WriteString(fmt.Sprintf("| Estimated gross token savings | %d |\n", data.EstimatedGrossSavings))
+			sb.WriteString("| Savings note | Controller/Codex session tokens were not reported, so net savings are unknown. |\n")
+		}
+	}
+	sb.WriteString(fmt.Sprintf("| Generation attempts | %d |\n", data.GenerationAttempts))
+	sb.WriteString(fmt.Sprintf("| Max repair attempts | %d |\n", data.MaxRepairAttempts))
+	sb.WriteString(fmt.Sprintf("| Truncated output | %t |\n", data.TruncatedOutput))
+	sb.WriteString(fmt.Sprintf("| Patch effect verified | %t |\n", data.PatchEffectVerified))
+	sb.WriteString(fmt.Sprintf("| Effective changed files | %d |\n", data.EffectiveChangedFiles))
+	sb.WriteString(fmt.Sprintf("| Patch changed lines | %d |\n", data.PatchChangedLines))
+	sb.WriteString(fmt.Sprintf("| Technical verification | `%s` |\n", data.TechnicalVerification))
+	sb.WriteString(fmt.Sprintf("| Business acceptance | `%s` |\n", data.BusinessAcceptance))
+	if data.TotalTokens > 0 {
+		sb.WriteString(fmt.Sprintf("| Executor effective tokens | %d |\n", data.ExecutorEffectiveTokens))
+		sb.WriteString(fmt.Sprintf("| Executor wasted tokens | %d |\n", data.ExecutorWastedTokens))
+		sb.WriteString(fmt.Sprintf("| Executor waste rate | %.2f%% |\n", data.ExecutorWasteRate*100))
+	}
 	sb.WriteString(fmt.Sprintf("| 开始时间 | %s |\n", data.StartedAt.Format(time.RFC3339)))
 	sb.WriteString(fmt.Sprintf("| 结束时间 | %s |\n", data.FinishedAt.Format(time.RFC3339)))
 	sb.WriteString(fmt.Sprintf("| 耗时 | %s |\n", data.FinishedAt.Sub(data.StartedAt).Round(time.Millisecond)))
@@ -101,6 +146,21 @@ func (g *Generator) GenerateMarkdown(data *ReportData) (string, error) {
 		sb.WriteString("## 修改文件\n\n")
 		for _, f := range data.ModifiedFiles {
 			sb.WriteString(fmt.Sprintf("- `%s`\n", f))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(data.FileHashChanges) > 0 {
+		sb.WriteString("## File hash verification\n\n")
+		sb.WriteString("| File | Before SHA-256 | After SHA-256 |\n")
+		sb.WriteString("|------|---------------|--------------|\n")
+		for _, change := range data.FileHashChanges {
+			sb.WriteString(fmt.Sprintf(
+				"| `%s` | `%s` | `%s` |\n",
+				change.File,
+				change.BeforeSHA256,
+				change.AfterSHA256,
+			))
 		}
 		sb.WriteString("\n")
 	}

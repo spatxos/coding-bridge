@@ -9,22 +9,34 @@ import (
 	"time"
 
 	"github.com/coding-bridge/internal/config"
+	"github.com/coding-bridge/internal/patch"
 	"github.com/coding-bridge/internal/providers"
 )
 
 type fakeProvider struct {
-	response *providers.GenerateResponse
-	request  *providers.GenerateRequest
+	response     *providers.GenerateResponse
+	request      *providers.GenerateRequest
+	providerType providers.ProviderType
+	healthStatus providers.HealthStatus
 }
 
-func (p *fakeProvider) Type() providers.ProviderType { return providers.ProviderDeepSeek }
-func (p *fakeProvider) Name() string                 { return "fake" }
+func (p *fakeProvider) Type() providers.ProviderType {
+	if p.providerType != "" {
+		return p.providerType
+	}
+	return providers.ProviderDeepSeek
+}
+func (p *fakeProvider) Name() string { return "fake" }
 func (p *fakeProvider) Generate(_ context.Context, req *providers.GenerateRequest) (*providers.GenerateResponse, error) {
 	p.request = req
 	return p.response, nil
 }
 func (p *fakeProvider) HealthCheck(context.Context) (*providers.HealthCheckResult, error) {
-	return &providers.HealthCheckResult{Status: providers.HealthHealthy}, nil
+	status := p.healthStatus
+	if status == "" {
+		status = providers.HealthHealthy
+	}
+	return &providers.HealthCheckResult{Status: status}, nil
 }
 func (p *fakeProvider) ListModels(context.Context) ([]string, error) {
 	return []string{"cheap-model"}, nil
@@ -47,6 +59,7 @@ func TestRunnerSendsContextUsesRequestedModelAndWritesReport(t *testing.T) {
 			"@@ -1 +1 @@",
 			"-old",
 			"+new",
+			patch.EndMarker,
 		}, "\n"),
 		Model: "cheap-model",
 		Usage: providers.UsageInfo{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
@@ -71,6 +84,15 @@ func TestRunnerSendsContextUsesRequestedModelAndWritesReport(t *testing.T) {
 	if result.TaskResult.TotalTokens != 120 {
 		t.Fatalf("TotalTokens = %d, want 120", result.TaskResult.TotalTokens)
 	}
+	if !result.TaskResult.PatchEffectVerified ||
+		result.TaskResult.EffectiveChangedFiles != 1 ||
+		len(result.TaskResult.FileHashChanges) != 1 {
+		t.Fatalf("patch verification = %#v", result.TaskResult)
+	}
+	if result.TaskResult.ExecutorEffectiveTokens != 120 ||
+		result.TaskResult.ExecutorWastedTokens != 0 {
+		t.Fatalf("token disposition = %#v", result.TaskResult)
+	}
 	if _, err := os.Stat(result.ReportPath); err != nil {
 		t.Fatalf("report was not written: %v", err)
 	}
@@ -81,7 +103,7 @@ func TestRunnerWritesFailureReport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	provider := &fakeProvider{response: &providers.GenerateResponse{Content: "not a diff"}}
+	provider := &fakeProvider{response: &providers.GenerateResponse{Content: "not a diff\n" + patch.EndMarker}}
 
 	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
 	if result.Err == nil {
@@ -92,6 +114,261 @@ func TestRunnerWritesFailureReport(t *testing.T) {
 	}
 	if _, err := os.Stat(result.ReportPath); err != nil {
 		t.Fatalf("failure report was not written: %v", err)
+	}
+}
+
+func TestRunnerRejectsTruncatedExecutorOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content:      "diff --git a/main.txt b/main.txt\n--- a/main.txt\n",
+		FinishReason: "length",
+		Usage: providers.UsageInfo{
+			CompletionTokens: 4096,
+			TotalTokens:      4200,
+		},
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want truncation error")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "truncated") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+	if !result.TaskResult.TruncatedOutput {
+		t.Fatal("TruncatedOutput = false, want true")
+	}
+}
+
+func TestRunnerRejectsMissingEndMarkerEvenWhenFinishReasonIsStop(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+		}, "\n"),
+		FinishReason: "stop",
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err == nil || !result.TaskResult.TruncatedOutput {
+		t.Fatalf("result = %#v, err = %v", result.TaskResult, result.Err)
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TRUNCATED_OUTPUT") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerAcceptsMarkdownWrappedDiffWithEndMarker(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"```diff",
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			"```",
+			patch.EndMarker,
+		}, "\n"),
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v", result.Err)
+	}
+	if !result.TaskResult.PatchEffectVerified ||
+		result.TaskResult.EffectiveChangedFiles != 1 {
+		t.Fatalf("result = %#v", result.TaskResult)
+	}
+}
+
+func TestRunnerRejectsPatchWithNoEffectiveHashChange(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+old",
+			patch.EndMarker,
+		}, "\n"),
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want no effective change failure")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "NO_EFFECTIVE_CHANGE") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "main.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "old\n" {
+		t.Fatalf("file content = %q", data)
+	}
+}
+
+func TestRunnerRequestsLargerPatchTokenBudget(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			patch.EndMarker,
+		}, "\n"),
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v", result.Err)
+	}
+	if provider.request == nil || provider.request.MaxTokens != 16384 {
+		t.Fatalf("MaxTokens = %v, want 16384", provider.request)
+	}
+}
+
+func TestRunnerUsesConfiguredPatchBudgetAndCalculatesObservedNetSavings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			patch.EndMarker,
+		}, "\n"),
+		Usage: providers.UsageInfo{PromptTokens: 600, CompletionTokens: 400, TotalTokens: 1000},
+	}}
+	runner := newTestRunner(root, provider)
+	runner.cfg.Execution.PatchMaxTokens = 8192
+	runner.cfg.Execution.Temperature = 0
+	runner.cfg.TokenAccounting.DirectCodexBaselineRatio = 3
+	task := validTestTask()
+	task.Controller.ObservedTokens = 500
+
+	result := runner.Run(context.Background(), task)
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v", result.Err)
+	}
+	if provider.request.MaxTokens != 8192 || provider.request.Temperature != 0 {
+		t.Fatalf("request = %#v", provider.request)
+	}
+	if result.TaskResult.EstimatedDirectTokens != 3000 ||
+		result.TaskResult.EstimatedGrossSavings != 2000 ||
+		result.TaskResult.EstimatedNetSavings != 1500 {
+		t.Fatalf("token estimates = %#v", result.TaskResult)
+	}
+}
+
+func TestDryRunFallsBackToHealthyConfiguredProviderInAutoMode(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.ProviderSelection.FallbackOrder = []string{"deepseek", "qwen"}
+	registry := providers.NewRegistry()
+	registry.Register(&fakeProvider{
+		providerType: providers.ProviderDeepSeek,
+		healthStatus: providers.HealthUnhealthy,
+	})
+	registry.Register(&fakeProvider{
+		providerType: providers.ProviderQwen,
+		healthStatus: providers.HealthHealthy,
+	})
+	runner := NewRunner(root, cfg, registry)
+	task := validTestTask()
+	task.Executor.Selection = "auto"
+
+	result, err := runner.DryRun(context.Background(), task)
+	if err != nil {
+		t.Fatalf("DryRun() error = %v", err)
+	}
+	if result.TaskResult.Status != StateCompleted {
+		t.Fatalf("status = %s", result.TaskResult.Status)
+	}
+}
+
+func TestRunnerRejectsOversizedTaskBeforeCallingExecutor(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("old\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.AllowedFiles = []string{"a.txt", "b.txt", "c.txt", "d.txt"}
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil || !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_LARGE") {
+		t.Fatalf("result = %#v, err = %v", result.TaskResult, result.Err)
+	}
+	if provider.request != nil || result.TaskResult.TotalTokens != 0 {
+		t.Fatalf("Executor was called for oversized task: %#v", provider.request)
+	}
+}
+
+func TestRunnerRejectsOversizedPatchAndMarksTokensWasted(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			patch.EndMarker,
+		}, "\n"),
+		Usage: providers.UsageInfo{TotalTokens: 900},
+	}}
+	runner := newTestRunner(root, provider)
+	runner.cfg.Execution.MaxPatchLines = 1
+
+	result := runner.Run(context.Background(), validTestTask())
+	if result.Err == nil || !strings.Contains(result.TaskResult.FailureReason, "PATCH_TOO_LARGE") {
+		t.Fatalf("result = %#v, err = %v", result.TaskResult, result.Err)
+	}
+	if result.TaskResult.ExecutorWastedTokens != 900 ||
+		result.TaskResult.ExecutorWasteRate != 1 {
+		t.Fatalf("token disposition = %#v", result.TaskResult)
 	}
 }
 

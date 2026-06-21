@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/coding-bridge/internal/config"
@@ -35,6 +36,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 	projectRoot, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("获取当前目录失败: %w", err)
+	}
+
+	added, err := ensureCodingBridgeGitignore(projectRoot)
+	if err != nil {
+		return err
+	}
+	if added {
+		fmt.Println("✅ 已将 /.coding-bridge/ 添加到 .gitignore")
+		fmt.Println()
 	}
 
 	loader := config.NewLoader(projectRoot)
@@ -70,6 +80,9 @@ func quickInit(loader *config.Loader) error {
 	if err != nil {
 		return fmt.Errorf("初始化失败: %w", err)
 	}
+	if _, _, err := installCodexInstructions(loader.ProjectRoot(), cfg); err != nil {
+		return fmt.Errorf("install Codex workflow: %w", err)
+	}
 	fmt.Printf("✅ 已创建默认配置 (版本 %d)\n", cfg.Version)
 	fmt.Println()
 	fmt.Println("下一步:")
@@ -88,6 +101,13 @@ func webInit(loader *config.Loader, projectRoot string) error {
 		}
 		fmt.Printf("✅ 已创建默认配置 (版本 %d)\n", cfg.Version)
 		fmt.Println()
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		return err
+	}
+	if _, _, err := installCodexInstructions(projectRoot, cfg); err != nil {
+		return fmt.Errorf("install Codex workflow: %w", err)
 	}
 
 	// 启动 Web 服务器
@@ -120,4 +140,34 @@ func webInit(loader *config.Loader, projectRoot string) error {
 
 	// 阻塞等待
 	select {}
+}
+
+func ensureCodingBridgeGitignore(projectRoot string) (bool, error) {
+	gitignorePath := filepath.Join(projectRoot, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("读取 .gitignore 失败: %w", err)
+	}
+
+	content := string(data)
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		switch strings.TrimSpace(line) {
+		case ".coding-bridge", ".coding-bridge/", "/.coding-bridge", "/.coding-bridge/":
+			return false, nil
+		}
+	}
+
+	lineEnding := "\n"
+	if strings.Contains(content, "\r\n") {
+		lineEnding = "\r\n"
+	}
+	trimmed := strings.TrimRight(content, "\r\n")
+	if trimmed != "" {
+		trimmed += lineEnding
+	}
+	updated := trimmed + "/.coding-bridge/" + lineEnding
+	if err := os.WriteFile(gitignorePath, []byte(updated), 0644); err != nil {
+		return false, fmt.Errorf("写入 .gitignore 失败: %w", err)
+	}
+	return true, nil
 }

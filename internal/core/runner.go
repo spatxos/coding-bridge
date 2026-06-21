@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,8 +47,12 @@ type RunResult struct {
 // Run 执行一个完整的任务流程
 func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result := &TaskResult{
-		TaskID:    task.TaskID,
-		StartedAt: time.Now(),
+		TaskID:                task.TaskID,
+		ControllerTokens:      task.Controller.ObservedTokens,
+		MaxRepairAttempts:     r.cfg.Execution.MaxRepairAttempts,
+		TechnicalVerification: "NOT_STARTED",
+		BusinessAcceptance:    "controller_review_required",
+		StartedAt:             time.Now(),
 	}
 	var snapshot *sandbox.Snapshot
 
@@ -71,6 +77,26 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	}
 	result.ContextFiles = collectedContext.TotalFiles
 	result.ContextBytes = collectedContext.TotalSize
+	if r.cfg.Execution.EnforceTaskBudgets {
+		if len(task.AllowedFiles) > r.cfg.Execution.MaxTaskFiles {
+			result.Status = StateFailed
+			result.FailureReason = fmt.Sprintf(
+				"TASK_TOO_LARGE: %d allowed files exceeds configured maximum %d; split the task before calling an Executor",
+				len(task.AllowedFiles),
+				r.cfg.Execution.MaxTaskFiles,
+			)
+			return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
+		}
+		if collectedContext.TotalSize > r.cfg.Execution.MaxContextBytes {
+			result.Status = StateFailed
+			result.FailureReason = fmt.Sprintf(
+				"TASK_TOO_LARGE: %d context bytes exceeds configured maximum %d; reduce allowed_files or split the task",
+				collectedContext.TotalSize,
+				r.cfg.Execution.MaxContextBytes,
+			)
+			return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
+		}
+	}
 	_ = sm.Transition(StateContextCollected)
 
 	// Step 3: 选择 Provider
@@ -86,6 +112,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	// Step 4: 请求 Executor 生成 patch
 	_ = sm.Transition(StatePatchRequested)
 	patchResponse, err := r.requestPatch(ctx, task, executorProvider, collectedContext)
+	result.GenerationAttempts = 1
 	if err != nil {
 		result.Status = StateFailed
 		result.FailureReason = fmt.Sprintf("patch generation failed: %v", err)
@@ -98,7 +125,19 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.PromptTokens = patchResponse.Usage.PromptTokens
 	result.CompletionTokens = patchResponse.Usage.CompletionTokens
 	result.TotalTokens = patchResponse.Usage.TotalTokens
+	r.calculateTokenSavings(result)
 	_ = sm.Transition(StatePatchGenerated)
+	result.TechnicalVerification = "PATCH_GENERATED"
+
+	if strings.EqualFold(strings.TrimSpace(patchResponse.FinishReason), "length") {
+		result.Status = StateFailed
+		result.TruncatedOutput = true
+		result.FailureReason = fmt.Sprintf(
+			"executor output was truncated at %d completion tokens; reduce allowed_files/task scope or increase the patch token budget",
+			result.CompletionTokens,
+		)
+		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
+	}
 
 	// 检查特殊响应
 	responseContent := strings.TrimSpace(patchResponse.Content)
@@ -116,6 +155,12 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		result.FailureReason = "executor returned FAILED"
 		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 	}
+	if !patch.HasEndMarker(responseContent) {
+		result.Status = StateFailed
+		result.TruncatedOutput = true
+		result.FailureReason = "TRUNCATED_OUTPUT: executor response is missing END_CODING_BRIDGE_EDIT"
+		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
+	}
 
 	// Step 5: 解析和校验 Patch
 	parser := patch.NewParser()
@@ -126,6 +171,17 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		return r.finish(result, snapshot, err)
 	}
 	result.GitDiff = parseResult.RawDiff
+	result.PatchChangedLines = countPatchChangedLines(parseResult)
+	if r.cfg.Execution.EnforceTaskBudgets &&
+		result.PatchChangedLines > r.cfg.Execution.MaxPatchLines {
+		result.Status = StateFailed
+		result.FailureReason = fmt.Sprintf(
+			"PATCH_TOO_LARGE: %d changed lines exceeds configured maximum %d; split the task",
+			result.PatchChangedLines,
+			r.cfg.Execution.MaxPatchLines,
+		)
+		return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
+	}
 
 	validator := patch.NewValidator(task.AllowedFiles, task.ForbiddenFiles, task.Requirements)
 	if errs := validator.Validate(parseResult); len(errs) > 0 {
@@ -134,6 +190,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		return r.finish(result, snapshot, fmt.Errorf("validation: %v", errs))
 	}
 	_ = sm.Transition(StatePatchValidated)
+	result.TechnicalVerification = "PARSE_AND_VALIDATE_OK"
 
 	// Step 6: 风险检查
 	_ = sm.Transition(StateRiskChecked)
@@ -154,6 +211,18 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 
 	// Step 8: 在隔离执行目录应用 Patch
 	executionRoot := r.sandbox.ExecutionRoot(snapshot)
+	targetFiles := patchTargetFiles(parseResult)
+	beforeHashes, err := hashTargetFiles(executionRoot, targetFiles)
+	if err != nil {
+		rollbackErr := r.sandbox.Rollback(snapshot)
+		result.Status = StateFailed
+		result.FailureReason = fmt.Sprintf("capture pre-apply hashes failed: %v", err)
+		result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
+		if rollbackErr != nil {
+			result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
+		}
+		return r.finish(result, snapshot, err)
+	}
 	applier := patch.NewApplier(executionRoot)
 	modifiedFiles, err := applier.Apply(parseResult)
 	if err != nil {
@@ -166,8 +235,26 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		}
 		return r.finish(result, snapshot, err)
 	}
+	hashChanges, err := verifyTargetFileChanges(executionRoot, targetFiles, beforeHashes)
+	if err != nil || len(hashChanges) == 0 {
+		if err == nil {
+			err = fmt.Errorf("NO_EFFECTIVE_CHANGE: patch applied without changing target file hashes")
+		}
+		rollbackErr := r.sandbox.Rollback(snapshot)
+		result.Status = StateFailed
+		result.FailureReason = fmt.Sprintf("patch effect verification failed: %v", err)
+		result.RollbackInfo = fmt.Sprintf("rolled back via %s", snapshot.Method)
+		if rollbackErr != nil {
+			result.RollbackInfo += fmt.Sprintf(" (rollback failed: %v)", rollbackErr)
+		}
+		return r.finish(result, snapshot, err)
+	}
 	result.ModifiedFiles = modifiedFiles
+	result.PatchEffectVerified = true
+	result.EffectiveChangedFiles = len(hashChanges)
+	result.FileHashChanges = hashChanges
 	_ = sm.Transition(StatePatchApplied)
+	result.TechnicalVerification = "APPLY_AND_HASH_OK"
 
 	// Step 9: 执行任务明确允许的构建、测试和检查命令
 	cmdRunner := commands.NewRunner(
@@ -198,6 +285,13 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		}
 	}
 	_ = sm.Transition(StateCommandsExecuted)
+	if result.TestResult != nil {
+		result.TechnicalVerification = "TEST_OK"
+	} else if result.BuildResult != nil {
+		result.TechnicalVerification = "BUILD_OK"
+	} else {
+		result.TechnicalVerification = "COMMANDS_OK"
+	}
 
 	// Step 10: 基础安全检查。更完整的 secret scanner 后续接入。
 	result.SecurityCheck = &SecurityCheckResult{Passed: true}
@@ -210,8 +304,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 
 // selectExecutor 选择 Executor Provider
 func (r *Runner) selectExecutor(ctx context.Context, task *Task) (providers.Provider, error) {
-	if task.Executor.Selection == "manual" || task.Executor.PreferredProvider != "" {
-		// 手动指定
+	if task.Executor.Selection == "manual" {
 		pt := providers.ProviderType(task.Executor.PreferredProvider)
 		p, err := r.registry.Get(pt)
 		if err != nil {
@@ -220,8 +313,40 @@ func (r *Runner) selectExecutor(ctx context.Context, task *Task) (providers.Prov
 		return p, nil
 	}
 
-	// 自动选择
 	checker := providers.NewHealthChecker(r.registry)
+	var candidates []string
+	if task.Executor.PreferredProvider != "" {
+		candidates = append(candidates, task.Executor.PreferredProvider)
+	}
+	candidates = append(candidates, r.cfg.ProviderSelection.FallbackOrder...)
+	seen := map[string]bool{}
+	var failures []string
+	for _, name := range candidates {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		pt := providers.ProviderType(name)
+		p, err := r.registry.Get(pt)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		health, err := checker.CheckOne(ctx, pt)
+		if err == nil && health.Status != providers.HealthUnhealthy {
+			return p, nil
+		}
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %s", name, health.Status))
+		}
+	}
+	if len(candidates) > 0 {
+		return nil, ErrProviderUnavailablef("all configured providers are unavailable: %s", strings.Join(failures, "; "))
+	}
+
+	// 自动选择
 	selector := providers.NewSelector(r.registry, checker)
 
 	strategy := providers.SelectionStrategy{
@@ -256,7 +381,8 @@ RULES:
 4. Do NOT add, remove, or modify any secrets, environment variables, or config files
 5. If you cannot fix the issue with a diff, respond with exactly one of: NEED_MORE_CONTEXT, REFUSE, or FAILED
 6. Preserve original encoding and line endings
-7. Each diff must be minimal and focused on the exact fix only`
+7. Each diff must be minimal and focused on the exact fix only
+8. The final non-empty line MUST be exactly END_CODING_BRIDGE_EDIT`
 
 	// 构建用户消息
 	userPrompt := fmt.Sprintf(`Task: %s
@@ -275,7 +401,7 @@ Acceptance criteria:
 Source context:
 %s
 
-Generate ONLY a unified diff. No explanations.`,
+Generate ONLY a unified diff followed by END_CODING_BRIDGE_EDIT. No explanations.`,
 		task.Title,
 		task.Description,
 		formatList(task.AllowedFiles),
@@ -290,20 +416,136 @@ Generate ONLY a unified diff. No explanations.`,
 		Messages: []providers.ChatMessage{
 			{Role: "user", Content: userPrompt},
 		},
-		MaxTokens:   4096,
-		Temperature: 0.1, // 低温度以确保确定性输出
+		MaxTokens:   r.cfg.Execution.PatchMaxTokens,
+		Temperature: r.cfg.Execution.Temperature,
 		PatchOnly:   true,
 	}
 
-	resp, err := provider.Generate(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("provider generate: %w", err)
+	models := r.executorModels(task, provider)
+	var failures []string
+	for _, model := range models {
+		req.Model = model
+		resp, err := provider.Generate(ctx, req)
+		if err == nil && resp != nil {
+			return resp, nil
+		}
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", model, err))
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: empty response", model))
+		}
 	}
-	if resp == nil {
-		return nil, fmt.Errorf("provider generate returned an empty response")
-	}
+	return nil, fmt.Errorf("provider generate failed for all configured models: %s", strings.Join(failures, "; "))
+}
 
-	return resp, nil
+const missingFileHash = "<missing>"
+
+func hashTargetFiles(root string, files []string) (map[string]string, error) {
+	hashes := make(map[string]string, len(files))
+	for _, file := range files {
+		path := file
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, filepath.FromSlash(file))
+		}
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			hashes[file] = missingFileHash
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("hash %s: %w", file, err)
+		}
+		sum := sha256.Sum256(data)
+		hashes[file] = fmt.Sprintf("%x", sum[:])
+	}
+	return hashes, nil
+}
+
+func verifyTargetFileChanges(root string, files []string, before map[string]string) ([]FileHashChange, error) {
+	after, err := hashTargetFiles(root, files)
+	if err != nil {
+		return nil, err
+	}
+	var changed []FileHashChange
+	for _, file := range files {
+		if before[file] != after[file] {
+			changed = append(changed, FileHashChange{
+				File:         file,
+				BeforeSHA256: before[file],
+				AfterSHA256:  after[file],
+			})
+		}
+	}
+	return changed, nil
+}
+
+func toReportHashChanges(changes []FileHashChange) []report.FileHashChange {
+	result := make([]report.FileHashChange, 0, len(changes))
+	for _, change := range changes {
+		result = append(result, report.FileHashChange{
+			File:         change.File,
+			BeforeSHA256: change.BeforeSHA256,
+			AfterSHA256:  change.AfterSHA256,
+		})
+	}
+	return result
+}
+
+func countPatchChangedLines(result *patch.ParseResult) int {
+	total := 0
+	for _, file := range result.Files {
+		for _, hunk := range file.Hunks {
+			for _, line := range hunk.Lines {
+				if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+					total++
+				}
+			}
+		}
+	}
+	return total
+}
+
+func (r *Runner) executorModels(task *Task, provider providers.Provider) []string {
+	var models []string
+	if task.Executor.PreferredModel != "" &&
+		task.Executor.PreferredProvider == string(provider.Type()) {
+		models = append(models, task.Executor.PreferredModel)
+	}
+	for _, item := range r.cfg.Providers.Configs {
+		if item.Type != string(provider.Type()) {
+			continue
+		}
+		models = append(models, item.GetModels()...)
+	}
+	seen := map[string]bool{}
+	var unique []string
+	for _, model := range models {
+		if model != "" && !seen[model] {
+			seen[model] = true
+			unique = append(unique, model)
+		}
+	}
+	if len(unique) == 0 {
+		unique = append(unique, "")
+	}
+	return unique
+}
+
+func (r *Runner) calculateTokenSavings(result *TaskResult) {
+	if !r.cfg.TokenAccounting.Enabled || result.TotalTokens <= 0 {
+		return
+	}
+	ratio := r.cfg.TokenAccounting.DirectCodexBaselineRatio
+	if ratio < 1 {
+		ratio = 1
+	}
+	result.EstimatedDirectTokens = int(float64(result.TotalTokens) * ratio)
+	result.EstimatedGrossSavings = result.EstimatedDirectTokens - result.TotalTokens
+	if result.ControllerTokens > 0 {
+		result.EstimatedNetSavings = result.EstimatedDirectTokens -
+			result.TotalTokens -
+			result.ControllerTokens
+	}
 }
 
 // formatList 格式化为带 - 前缀的列表
@@ -372,6 +614,14 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 		}
 	}
 	result.FinishedAt = time.Now()
+	if result.TotalTokens > 0 {
+		if result.Status == StateCompleted {
+			result.ExecutorEffectiveTokens = result.TotalTokens
+		} else {
+			result.ExecutorWastedTokens = result.TotalTokens
+			result.ExecutorWasteRate = 1
+		}
+	}
 
 	outputDir := r.cfg.Report.OutputDir
 	if !filepath.IsAbs(outputDir) {
@@ -411,14 +661,8 @@ func (r *Runner) DryRun(ctx context.Context, task *Task) (*RunResult, error) {
 		return &RunResult{TaskResult: result}, fmt.Errorf("validation: %v", errs)
 	}
 
-	// 检查 Provider 可用性
-	checker := providers.NewHealthChecker(r.registry)
-	pt := providers.ProviderType(task.Executor.PreferredProvider)
-	if task.Executor.PreferredProvider != "" {
-		healthResult, err := checker.CheckOne(ctx, pt)
-		if err != nil || healthResult.Status == providers.HealthUnhealthy {
-			return &RunResult{TaskResult: result}, fmt.Errorf("provider %q is not healthy", pt)
-		}
+	if _, err := r.selectExecutor(ctx, task); err != nil {
+		return &RunResult{TaskResult: result}, err
 	}
 
 	result.Status = StateCompleted
@@ -443,21 +687,37 @@ func (r *Runner) GetProjectRoot() string {
 // taskResultToReportData 将 TaskResult 转换为 report.ReportData
 func taskResultToReportData(tr *TaskResult) *report.ReportData {
 	data := &report.ReportData{
-		TaskID:           tr.TaskID,
-		Status:           string(tr.Status),
-		Provider:         tr.Provider,
-		Model:            tr.Model,
-		ContextFiles:     tr.ContextFiles,
-		ContextBytes:     tr.ContextBytes,
-		PromptTokens:     tr.PromptTokens,
-		CompletionTokens: tr.CompletionTokens,
-		TotalTokens:      tr.TotalTokens,
-		ModifiedFiles:    tr.ModifiedFiles,
-		GitDiff:          tr.GitDiff,
-		FailureReason:    tr.FailureReason,
-		RollbackInfo:     tr.RollbackInfo,
-		StartedAt:        tr.StartedAt,
-		FinishedAt:       tr.FinishedAt,
+		TaskID:                  tr.TaskID,
+		Status:                  string(tr.Status),
+		Provider:                tr.Provider,
+		Model:                   tr.Model,
+		ContextFiles:            tr.ContextFiles,
+		ContextBytes:            tr.ContextBytes,
+		PromptTokens:            tr.PromptTokens,
+		CompletionTokens:        tr.CompletionTokens,
+		TotalTokens:             tr.TotalTokens,
+		ControllerTokens:        tr.ControllerTokens,
+		EstimatedDirectTokens:   tr.EstimatedDirectTokens,
+		EstimatedGrossSavings:   tr.EstimatedGrossSavings,
+		EstimatedNetSavings:     tr.EstimatedNetSavings,
+		TruncatedOutput:         tr.TruncatedOutput,
+		PatchEffectVerified:     tr.PatchEffectVerified,
+		EffectiveChangedFiles:   tr.EffectiveChangedFiles,
+		GenerationAttempts:      tr.GenerationAttempts,
+		MaxRepairAttempts:       tr.MaxRepairAttempts,
+		PatchChangedLines:       tr.PatchChangedLines,
+		ExecutorEffectiveTokens: tr.ExecutorEffectiveTokens,
+		ExecutorWastedTokens:    tr.ExecutorWastedTokens,
+		ExecutorWasteRate:       tr.ExecutorWasteRate,
+		FileHashChanges:         toReportHashChanges(tr.FileHashChanges),
+		TechnicalVerification:   tr.TechnicalVerification,
+		BusinessAcceptance:      tr.BusinessAcceptance,
+		ModifiedFiles:           tr.ModifiedFiles,
+		GitDiff:                 tr.GitDiff,
+		FailureReason:           tr.FailureReason,
+		RollbackInfo:            tr.RollbackInfo,
+		StartedAt:               tr.StartedAt,
+		FinishedAt:              tr.FinishedAt,
 	}
 
 	for _, cmd := range tr.CommandsRun {

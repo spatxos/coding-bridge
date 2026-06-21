@@ -74,12 +74,25 @@ func (l *Loader) Exists() bool {
 	return err == nil
 }
 
+func (l *Loader) ProjectRoot() string {
+	return l.projectRoot
+}
+
+func (l *Loader) ConfigPath() string {
+	return l.configPath
+}
+
 // mergeDefaults 将默认值合并到配置中（对于零值字段）
 func mergeDefaults(cfg AppConfig) AppConfig {
 	defaults := DefaultConfig()
+	loadedVersion := cfg.Version
 
 	if cfg.Version == 0 {
 		cfg.Version = defaults.Version
+	}
+	if loadedVersion < 3 {
+		cfg.Codex = defaults.Codex
+		cfg.TokenAccounting = defaults.TokenAccounting
 	}
 	if cfg.Providers.DefaultController == "" {
 		cfg.Providers.DefaultController = defaults.Providers.DefaultController
@@ -122,6 +135,24 @@ func mergeDefaults(cfg AppConfig) AppConfig {
 	}
 	if cfg.Web.Port == 0 {
 		cfg.Web.Port = defaults.Web.Port
+	}
+	if cfg.Execution.PatchMaxTokens == 0 {
+		cfg.Execution.PatchMaxTokens = defaults.Execution.PatchMaxTokens
+	}
+	if loadedVersion < 3 {
+		cfg.Execution.Temperature = defaults.Execution.Temperature
+	}
+	if loadedVersion < 4 {
+		cfg.Execution.MaxRepairAttempts = defaults.Execution.MaxRepairAttempts
+	}
+	if loadedVersion < 5 {
+		cfg.Execution.EnforceTaskBudgets = defaults.Execution.EnforceTaskBudgets
+		cfg.Execution.MaxTaskFiles = defaults.Execution.MaxTaskFiles
+		cfg.Execution.MaxContextBytes = defaults.Execution.MaxContextBytes
+		cfg.Execution.MaxPatchLines = defaults.Execution.MaxPatchLines
+	}
+	if cfg.TokenAccounting.DirectCodexBaselineRatio == 0 {
+		cfg.TokenAccounting.DirectCodexBaselineRatio = defaults.TokenAccounting.DirectCodexBaselineRatio
 	}
 
 	if cfg.Timeouts.ProviderRequest == 0 {

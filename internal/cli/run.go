@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/coding-bridge/internal/config"
 	"github.com/coding-bridge/internal/core"
@@ -17,6 +18,7 @@ var (
 	runAllowForbidden bool
 	runProvider       string
 	runModel          string
+	runProject        string
 )
 
 var runCmd = &cobra.Command{
@@ -43,7 +45,10 @@ var runCmd = &cobra.Command{
 		taskPath := args[0]
 
 		// 加载配置
-		projectRoot, _ := os.Getwd()
+		projectRoot, err := resolveProjectRoot(runProject)
+		if err != nil {
+			return fmt.Errorf("确定项目根目录失败: %w", err)
+		}
 		loader := config.NewLoader(projectRoot)
 		cfg, err := loader.Load()
 		if err != nil {
@@ -51,6 +56,9 @@ var runCmd = &cobra.Command{
 		}
 
 		// 加载任务
+		if !filepath.IsAbs(taskPath) && runProject != "" {
+			taskPath = filepath.Join(projectRoot, taskPath)
+		}
 		task, err := core.LoadTask(taskPath)
 		if err != nil {
 			return fmt.Errorf("加载任务失败: %w", err)
@@ -147,4 +155,5 @@ func init() {
 	runCmd.Flags().BoolVar(&runAllowForbidden, "allow-read-forbidden", false, "允许读取禁止文件")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "指定 Executor Provider")
 	runCmd.Flags().StringVar(&runModel, "model", "", "指定 Executor 模型")
+	runCmd.Flags().StringVar(&runProject, "project", "", "项目根目录；默认从当前目录向上查找 .coding-bridge 或 .git")
 }

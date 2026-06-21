@@ -93,6 +93,7 @@ coding-bridge/
 │       ├── run.go                     #     coding-bridge run
 │       ├── providers.go               #     coding-bridge providers
 │       ├── config.go                  #     coding-bridge config
+│       ├── codex.go                   #     coding-bridge codex install
 │       └── status.go                  #     coding-bridge status / report / rollback
 ├── config.example.yaml                # 配置示例
 ├── task.example.json                  # 任务示例
@@ -134,6 +135,11 @@ Windows (PowerShell):
 $env:DEEPSEEK_API_KEY="sk-xxx"
 ```
 
+也可以直接在 `coding-bridge init` 打开的 Web 配置页中填写 Key。该方式会把
+Key 保存到项目本地的 `.coding-bridge/config.yaml`，不需要配置系统环境变量。
+初始化时工具会自动把 `/.coding-bridge/` 加入项目 `.gitignore`，防止 Key、
+任务、报告和备份被提交到 Git。
+
 > 💡 如果你想把 OpenAI / Qwen / Ollama 等其他模型作为 Executor，只需在配置中启用并设置对应的 API Key。详见下方「新增模型 Provider」。
 
 ### 初始化项目
@@ -143,6 +149,13 @@ $env:DEEPSEEK_API_KEY="sk-xxx"
 ```
 
 这会在项目根目录创建 `.coding-bridge/config.yaml`，包含完整的默认配置。
+同时会创建或更新 `.gitignore`，加入：
+
+```gitignore
+/.coding-bridge/
+```
+
+已有 `.gitignore` 内容会保留，重复执行 `init` 不会重复添加。
 
 ### 检测 Provider 状态
 
@@ -154,6 +167,105 @@ $env:DEEPSEEK_API_KEY="sk-xxx"
 ./coding-bridge providers check --provider deepseek
 ```
 
+## 在 Codex 对话中调用
+
+当前版本通过项目根目录的 `AGENTS.md` 告诉 Codex 如何生成任务并调用
+`coding-bridge`。这是一种对话触发的仓库级工作流，不是 MCP 工具按钮。
+
+`coding-bridge` 在这里是本地终端 CLI，不是 Codex 插件、Skill、Connector 或
+MCP 工具。Codex 不应搜索或安装名为 coding-bridge 的插件。
+
+### 1. 确保 Codex 能找到 CLI
+
+把 `coding-bridge` 或 `coding-bridge.exe` 放入 `PATH`。也可以把可执行文件放在
+目标项目根目录，Windows 下 Codex 会回退使用 `.\coding-bridge.exe`。
+
+检查：
+
+```powershell
+coding-bridge --help
+```
+
+### 2. 在目标项目初始化
+
+以下命令应在你希望 Codex 修改的项目根目录执行，而不是必须在
+`coding-bridge` 源码目录执行：
+
+```powershell
+coding-bridge init --quick
+coding-bridge providers check --provider deepseek
+coding-bridge codex install
+```
+
+`coding-bridge codex install` 会：
+
+- 创建或更新项目根目录的 `AGENTS.md`
+- 保留 `AGENTS.md` 中已有的其他规则
+- 创建 `.coding-bridge/tasks/`
+- 确保 `/.coding-bridge/` 已加入 `.gitignore`
+- 写入 Codex 生成任务、执行、读报告和回滚的工作流
+
+安装后建议重新打开该项目的 Codex 会话，让项目指令被完整加载。
+可以打开项目根目录的 `AGENTS.md` 检查实际安装内容。
+
+### 3. 在 Codex 对话中明确触发
+
+直接对 Codex 说：
+
+```text
+通过本地终端 CLI 使用 coding-bridge 修复这个问题，并运行相关测试。
+不要搜索或安装插件。
+```
+
+或者：
+
+```text
+把这个实现任务交给 DeepSeek，使用 coding-bridge 执行。
+coding-bridge 是本地 CLI，不是插件。
+不要由 Controller 直接修改源码。
+```
+
+Codex 将按以下顺序工作：
+
+1. 只分析到足以确定任务范围和 `allowed_files`
+2. 创建 `.coding-bridge/tasks/<task-id>.json`
+3. 先运行 `coding-bridge run ... --dry-run`
+4. 再运行真实任务，由 DeepSeek 生成 patch
+5. 读取 `coding-bridge report <task-id>`
+6. 汇报修改文件、测试结果、token 用量、报告路径和回滚命令
+
+如果项目是干净的 Git 仓库，修改会保留在独立 worktree 中等待审查。Codex
+会报告 worktree 路径，不会在未获得明确批准时自动合并到主工作区。
+
+### 4. 常用后续对话
+
+```text
+查看刚才 coding-bridge 的执行报告。
+```
+
+```text
+检查 worktree 中的修改，确认没有越界，但先不要合并。
+```
+
+```text
+回滚刚才的 coding-bridge 任务。
+```
+
+也可以手动执行：
+
+```powershell
+coding-bridge status
+coding-bridge report latest
+coding-bridge rollback <task-id>
+```
+
+> `AGENTS.md` 接入已经可用。真正显示为 Codex 原生工具的
+> `bridge_run_task`、`bridge_get_report` 等能力需要 MCP Server，仍在后续版本计划中。
+
+如果 Codex 回复“未找到 coding-bridge 插件”，说明当前会话仍加载了旧版
+`AGENTS.md`。重新执行 `coding-bridge codex install`，然后新建或重新打开
+Codex 会话。
+
 ### 执行任务
 
 ```bash
@@ -162,9 +274,6 @@ $env:DEEPSEEK_API_KEY="sk-xxx"
 
 # 使用 DeepSeek V4 Pro
 ./coding-bridge run task.json --provider deepseek --model deepseek-chat
-
-# 使用 Codex
-./coding-bridge run task.json --provider openai --model gpt-4o
 
 # 允许高危操作（需谨慎）
 ./coding-bridge run task.json --allow-high-risk

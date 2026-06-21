@@ -152,14 +152,7 @@ func registerProvidersFromConfig(registry *providers.Registry, cfg *config.AppCo
 		if !pc.Enabled {
 			continue
 		}
-		apiKey := os.Getenv(strings.ToUpper(name) + "_API_KEY")
-		if apiKey == "" {
-			apiKey = pc.APIKey
-			// 去除 ${} 包装
-			apiKey = strings.TrimPrefix(apiKey, "${")
-			apiKey = strings.TrimSuffix(apiKey, "}")
-			apiKey = os.Getenv(apiKey)
-		}
+		apiKey := resolveProviderAPIKey(name, pc.APIKey)
 		// 取第一个模型
 		model := ""
 		if models := pc.GetModels(); len(models) > 0 {
@@ -179,4 +172,16 @@ func registerProvidersFromConfig(registry *providers.Registry, cfg *config.AppCo
 			registry.RegisterAlias("deepseek", providers.ProviderDeepSeek)
 		}
 	}
+}
+
+func resolveProviderAPIKey(name, configured string) string {
+	if key := os.Getenv(strings.ToUpper(name) + "_API_KEY"); key != "" {
+		return key
+	}
+	configured = strings.TrimSpace(configured)
+	if strings.HasPrefix(configured, "${") && strings.HasSuffix(configured, "}") {
+		envName := strings.TrimSuffix(strings.TrimPrefix(configured, "${"), "}")
+		return os.Getenv(envName)
+	}
+	return configured
 }
