@@ -200,6 +200,13 @@ type ExecutionSection struct {
 	MaxAcceptanceCriteriaChars int `yaml:"max_acceptance_criteria_chars" json:"max_acceptance_criteria_chars"`
 	MaxAcceptanceCriteriaCount int `yaml:"max_acceptance_criteria_count" json:"max_acceptance_criteria_count"`
 	MaxRequirementsCount       int `yaml:"max_requirements_count" json:"max_requirements_count"`
+	// Task split enforcement
+	RequireTaskSplit           bool     `yaml:"require_task_split" json:"require_task_split"`
+	MaxTaskTitleChars          int      `yaml:"max_task_title_chars" json:"max_task_title_chars"`
+	ForbidBroadTaskKeywords    []string `yaml:"forbid_broad_task_keywords" json:"forbid_broad_task_keywords"`
+	ForbidMultiDomainTask      bool     `yaml:"forbid_multi_domain_task" json:"forbid_multi_domain_task"`
+	MaxTaskDomains             int      `yaml:"max_task_domains" json:"max_task_domains"`
+	ForbidWideGlobAllowedFiles bool     `yaml:"forbid_wide_glob_allowed_files" json:"forbid_wide_glob_allowed_files"`
 }
 
 type CodexSection struct {
@@ -340,6 +347,20 @@ func DefaultConfig() *AppConfig {
 			MaxAcceptanceCriteriaChars: 4000,
 			MaxAcceptanceCriteriaCount: 20,
 			MaxRequirementsCount:       50,
+			RequireTaskSplit:           true,
+			MaxTaskTitleChars:          120,
+			ForbidBroadTaskKeywords: []string{
+				"完整实现", "全部实现", "整个流程", "整套流程",
+				"所有功能", "全面重构", "大重构", "顺便",
+				"同时实现", "一并实现", "端到端", "从前端到后端",
+				"UI和业务", "页面和流程", "协议和页面", "MES和设备",
+				"full implementation", "entire flow", "all features",
+				"end-to-end", "refactor everything", "frontend and backend",
+				"ui and logic", "also implement", "at the same time",
+			},
+			ForbidMultiDomainTask:      true,
+			MaxTaskDomains:             1,
+			ForbidWideGlobAllowedFiles: true,
 		},
 		Codex: CodexSection{
 			CLIEnabled:                   true,

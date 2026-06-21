@@ -334,7 +334,7 @@ func TestRunnerRejectsOversizedTaskBeforeCallingExecutor(t *testing.T) {
 	task.AllowedFiles = []string{"a.txt", "b.txt", "c.txt", "d.txt"}
 
 	result := runner.Run(context.Background(), task)
-	if result.Err == nil || !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_LARGE") {
+	if result.Err == nil || !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
 		t.Fatalf("result = %#v, err = %v", result.TaskResult, result.Err)
 	}
 	if provider.request != nil || result.TaskResult.TotalTokens != 0 {
@@ -437,9 +437,9 @@ func TestRunnerRejectsTaskWithTooManyRequirements(t *testing.T) {
 
 	result := runner.Run(context.Background(), task)
 	if result.Err == nil {
-		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+		t.Fatal("Run() error = nil, want TASK_TOO_BROAD")
 	}
-	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
 		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
 	}
 }
@@ -479,9 +479,111 @@ func TestRunnerRejectsTaskWithTooManyAcceptanceCriteria(t *testing.T) {
 
 	result := runner.Run(context.Background(), task)
 	if result.Err == nil {
-		t.Fatal("Run() error = nil, want TASK_TEXT_TOO_LARGE")
+		t.Fatal("Run() error = nil, want TASK_TOO_BROAD")
 	}
-	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TEXT_TOO_LARGE") {
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
 		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsTaskWithWideGlobPattern(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.AllowedFiles = []string{"src/**", "internal/**"}
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TOO_BROAD")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsTaskWithBroadKeyword(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.Description = "完整实现零漂测试流程和页面"
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TOO_BROAD")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerRejectsMultiDomainTask(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{}}
+	runner := newTestRunner(root, provider)
+	task := validTestTask()
+	task.Description = "实现零漂UI页面、MES上传和Modbus协议通讯"
+
+	result := runner.Run(context.Background(), task)
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want TASK_TOO_BROAD")
+	}
+	if !strings.Contains(result.TaskResult.FailureReason, "TASK_TOO_BROAD") {
+		t.Fatalf("failure reason = %q", result.TaskResult.FailureReason)
+	}
+}
+
+func TestRunnerPhaseReflectsRealFailureStage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{Content: "not a diff\n" + patch.EndMarker}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err == nil {
+		t.Fatal("Run() error = nil, want parse error")
+	}
+	if result.TaskResult.Phase != "patch_parse" {
+		t.Fatalf("Phase = %q, want patch_parse", result.TaskResult.Phase)
+	}
+	if result.TaskResult.FailureCode != "PATCH_PARSE_FAILED" {
+		t.Fatalf("FailureCode = %q, want PATCH_PARSE_FAILED", result.TaskResult.FailureCode)
+	}
+}
+
+func TestRunnerAcceptsSmallSingleDomainTask(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{response: &providers.GenerateResponse{
+		Content: strings.Join([]string{
+			"diff --git a/main.txt b/main.txt",
+			"--- a/main.txt",
+			"+++ b/main.txt",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			patch.EndMarker,
+		}, "\n"),
+	}}
+
+	result := newTestRunner(root, provider).Run(context.Background(), validTestTask())
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v, want nil", result.Err)
+	}
+	if result.TaskResult.Status != StateCompleted {
+		t.Fatalf("status = %s, want completed", result.TaskResult.Status)
 	}
 }

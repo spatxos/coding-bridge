@@ -510,12 +510,13 @@ func (g *Generator) saveSummary(path string, data *ReportData) error {
 
 	// Write State
 	sb.WriteString("## Write State\n\n")
-	sb.WriteString(fmt.Sprintf("- Patch generated: yes\n"))
-	sb.WriteString(fmt.Sprintf("- Patch validated: %s\n", boolToYesNo(data.TechnicalVerification != "NOT_STARTED")))
+	sb.WriteString(fmt.Sprintf("- Patch generated: %s\n", boolToYesNo(data.PatchGenerated)))
+	sb.WriteString(fmt.Sprintf("- Patch validated: %s\n", boolToYesNo(data.PatchValidated)))
 	sb.WriteString(fmt.Sprintf("- Snapshot created: %s\n", boolToYesNo(data.SnapshotCreated)))
-	sb.WriteString(fmt.Sprintf("- Patch applied: %s\n", boolToYesNo(data.PatchEffectVerified)))
+	sb.WriteString(fmt.Sprintf("- Patch applied: %s\n", boolToYesNo(data.PatchApplied)))
 	sb.WriteString(fmt.Sprintf("- Patch effect verified: %s\n", boolToYesNo(data.PatchEffectVerified)))
-	sb.WriteString(fmt.Sprintf("- Rolled back: %s\n", boolToYesNo(!isCompleted && data.RollbackInfo != "")))
+	sb.WriteString(fmt.Sprintf("- Commands executed: %s\n", boolToYesNo(data.CommandsExecuted)))
+	sb.WriteString(fmt.Sprintf("- Rolled back: %s\n", boolToYesNo(data.RolledBack)))
 	sb.WriteString(fmt.Sprintf("- Main workspace modified: %s\n", boolToYesNo(data.MainWorkspaceModified)))
 	sb.WriteString(fmt.Sprintf("- Execution mode: %s\n", data.ExecutionMode))
 	if data.ExecutionRoot != "" {

@@ -152,7 +152,7 @@ type Decision struct {
 type TaskResult struct {
 	TaskID                  string                    `json:"task_id"`
 	Status                  TaskState                 `json:"status"`
-	Phase                   TaskState                 `json:"phase,omitempty"`
+	Phase                   string                    `json:"phase,omitempty"`
 	Provider                string                    `json:"provider,omitempty"`
 	Model                   string                    `json:"model,omitempty"`
 	ContextFiles            int                       `json:"context_files"`
@@ -283,59 +283,6 @@ func (t *Task) Validate() []error {
 
 	if t.OutputFormat == "" {
 		t.OutputFormat = "unified_diff_only"
-	}
-
-	return errs
-}
-
-// ValidateTextBudgets 校验任务文本预算限制。
-// maxDescChars: description 最大字符数
-// maxReqChars: requirements 总字符数上限
-// maxAccCriteriaChars: acceptance_criteria 总字符数上限
-// maxAccCriteriaCount: acceptance_criteria 数量上限
-// maxReqCount: requirements 数量上限
-func (t *Task) ValidateTextBudgets(maxDescChars, maxReqChars, maxAccCriteriaChars, maxAccCriteriaCount, maxReqCount int) []error {
-	var errs []error
-
-	if maxDescChars > 0 && len(t.Description) > maxDescChars {
-		errs = append(errs, fmt.Errorf(
-			"TASK_TEXT_TOO_LARGE: task.description is %d chars, max is %d. Do not embed full documents or source code in task.json. Use allowed_files instead.",
-			len(t.Description), maxDescChars,
-		))
-	}
-
-	totalReqChars := 0
-	for _, req := range t.Requirements {
-		totalReqChars += len(req)
-	}
-	if maxReqCount > 0 && len(t.Requirements) > maxReqCount {
-		errs = append(errs, fmt.Errorf(
-			"TASK_TEXT_TOO_LARGE: task has %d requirements, max is %d",
-			len(t.Requirements), maxReqCount,
-		))
-	}
-	if maxReqChars > 0 && totalReqChars > maxReqChars {
-		errs = append(errs, fmt.Errorf(
-			"TASK_TEXT_TOO_LARGE: sum(requirements) is %d chars, max is %d",
-			totalReqChars, maxReqChars,
-		))
-	}
-
-	totalAccChars := 0
-	for _, ac := range t.AcceptanceCriteria {
-		totalAccChars += len(ac)
-	}
-	if maxAccCriteriaCount > 0 && len(t.AcceptanceCriteria) > maxAccCriteriaCount {
-		errs = append(errs, fmt.Errorf(
-			"TASK_TEXT_TOO_LARGE: task has %d acceptance criteria, max is %d",
-			len(t.AcceptanceCriteria), maxAccCriteriaCount,
-		))
-	}
-	if maxAccCriteriaChars > 0 && totalAccChars > maxAccCriteriaChars {
-		errs = append(errs, fmt.Errorf(
-			"TASK_TEXT_TOO_LARGE: sum(acceptance_criteria) is %d chars, max is %d",
-			totalAccChars, maxAccCriteriaChars,
-		))
 	}
 
 	return errs

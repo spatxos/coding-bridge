@@ -239,6 +239,10 @@ Codex 将按以下顺序工作：
 如果项目是干净的 Git 仓库，修改会保留在独立 worktree 中等待审查。Codex
 会报告 worktree 路径，不会在未获得明确批准时自动合并到主工作区。
 
+**coding-bridge 会主动拒绝过大的 task。** AI 工具必须把大需求拆成多个小 task，
+每个 task 只做一个目标。默认最多 3 个 allowed_files，禁止 UI + 业务流程 + MES + 协议混在一个 task 中。
+如果任务被拒绝，AI 工具应拆分任务后重试。
+
 ### 4. 常用后续对话
 
 ```text

@@ -141,6 +141,10 @@ func codexInstructionsBlock(cfg *config.AppConfig) string {
 		"16. Each task should modify at most 3 files unless explicitly configured.",
 		"17. If the result is in a Git worktree, inspect the worktree and report its path. Do not claim the main working tree was changed and do not merge automatically unless the user explicitly approves merging.",
 		"18. Summarize modified files, verification results, Executor token usage, report path, and rollback command. Use `coding-bridge rollback <task-id>` when the user asks to discard the bridge result.",
+		"19. Always split large requests into small tasks. Each task must have one clear goal. Do not create a task that mixes UI, business flow, MES, protocol, device I/O, and tests.",
+		"20. Do not use broad allowed_files patterns like **/*.go, src/**, internal/**. Use explicit file paths.",
+		"21. If the request is broad, first produce a task split plan instead of creating a single task.",
+		"22. coding-bridge will reject oversized tasks (TASK_TOO_BROAD). Accept the rejection and split into smaller tasks.",
 		codexBlockEnd,
 	}
 	return strings.Join(lines, "\n")

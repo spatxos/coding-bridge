@@ -70,8 +70,13 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 			err.Error(), false, "reduce_task_context")
 		return r.finish(result, snapshot, err)
 	}
+	if err := r.validateTaskScope(task); err != nil {
+		markFailure(result, "TASK_TOO_BROAD", "task_validation",
+			err.Error(), false, "split_task")
+		return r.finish(result, snapshot, err)
+	}
 	_ = sm.Transition(StateValidated)
-	result.Phase = StateValidated
+	result.Phase = string(StateValidated)
 
 	// Step 2: 收集允许文件的受控上下文
 	collector := bridgectx.NewCollector(r.projectRoot, task.AllowedFiles, task.ForbiddenFiles)
@@ -90,22 +95,11 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.ContextFiles = collectedContext.TotalFiles
 	result.ContextBytes = collectedContext.TotalSize
 	if r.cfg.Execution.EnforceTaskBudgets {
-		if len(task.AllowedFiles) > r.cfg.Execution.MaxTaskFiles {
-			result.Status = StateFailed
-			result.FailureReason = fmt.Sprintf(
-				"TASK_TOO_LARGE: %d allowed files exceeds configured maximum %d; split the task before calling an Executor",
-				len(task.AllowedFiles),
-				r.cfg.Execution.MaxTaskFiles,
-			)
-			return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
-		}
 		if collectedContext.TotalSize > r.cfg.Execution.MaxContextBytes {
-			result.Status = StateFailed
-			result.FailureReason = fmt.Sprintf(
-				"TASK_TOO_LARGE: %d context bytes exceeds configured maximum %d; reduce allowed_files or split the task",
-				collectedContext.TotalSize,
-				r.cfg.Execution.MaxContextBytes,
-			)
+			markFailure(result, "TASK_TOO_LARGE", "context_collection",
+				fmt.Sprintf("TASK_TOO_LARGE: %d context bytes exceeds configured maximum %d; reduce allowed_files or split the task",
+					collectedContext.TotalSize, r.cfg.Execution.MaxContextBytes),
+				false, "split_task")
 			return r.finish(result, snapshot, fmt.Errorf("%s", result.FailureReason))
 		}
 	}
@@ -120,7 +114,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	}
 	result.Provider = string(executorProvider.Type())
 	_ = sm.Transition(StateProviderSelected)
-	result.Phase = StateProviderSelected
+	result.Phase = string(StateProviderSelected)
 
 	// Step 4: 请求 Executor 生成 patch
 	_ = sm.Transition(StatePatchRequested)
@@ -133,7 +127,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 		return r.finish(result, snapshot, err)
 	}
 	result.PatchGenerated = true
-	result.Phase = StatePatchGenerated
+	result.Phase = string(StatePatchGenerated)
 	result.Model = patchResponse.Model
 	if result.Model == "" {
 		result.Model = task.Executor.PreferredModel
@@ -212,7 +206,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.PatchValidated = true
 	_ = sm.Transition(StatePatchValidated)
 	result.TechnicalVerification = "PARSE_AND_VALIDATE_OK"
-	result.Phase = StatePatchValidated
+	result.Phase = string(StatePatchValidated)
 
 	// Step 6: 风险检查
 	_ = sm.Transition(StateRiskChecked)
@@ -236,7 +230,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.ExecutionRoot = r.sandbox.ExecutionRoot(snapshot)
 	result.MainWorkspaceModified = false
 	_ = sm.Transition(StateSnapshotCreated)
-	result.Phase = StateSnapshotCreated
+	result.Phase = string(StateSnapshotCreated)
 
 	// Step 8: 在隔离执行目录应用 Patch
 	executionRoot := r.sandbox.ExecutionRoot(snapshot)
@@ -291,7 +285,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	result.FileHashChanges = hashChanges
 	_ = sm.Transition(StatePatchApplied)
 	result.TechnicalVerification = "APPLY_AND_HASH_OK"
-	result.Phase = StatePatchApplied
+	result.Phase = string(StatePatchApplied)
 
 	// Step 9: 执行任务明确允许的构建、测试和检查命令
 	cmdRunner := commands.NewRunner(
@@ -333,7 +327,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	} else {
 		result.TechnicalVerification = "COMMANDS_OK"
 	}
-	result.Phase = StateCommandsExecuted
+	result.Phase = string(StateCommandsExecuted)
 
 	// Step 10: 基础安全检查。更完整的 secret scanner 后续接入。
 	result.SecurityCheck = &SecurityCheckResult{Passed: true}
@@ -341,7 +335,7 @@ func (r *Runner) Run(ctx context.Context, task *Task) *RunResult {
 	_ = sm.Transition(StateReviewRequired)
 	_ = sm.Transition(StateCompleted)
 	result.Status = StateCompleted
-	result.Phase = StateReviewRequired
+	result.Phase = string(StateReviewRequired)
 	result.MergeRequired = true
 	result.SuggestedAction = "review_changes"
 	return r.finish(result, snapshot, nil)
@@ -553,12 +547,12 @@ func countPatchChangedLines(result *patch.ParseResult) int {
 // markFailure 标记任务失败，设置标准失败信息
 func markFailure(result *TaskResult, code, phase, message string, retryable bool, action string) {
 	result.Status = StateFailed
+	result.Phase = phase
 	result.FailureCode = code
 	result.FailurePhase = phase
 	result.FailureReason = message
 	result.Retryable = retryable
 	result.SuggestedAction = action
-	result.Phase = StateFailed
 }
 
 // classifyCommandFailure 根据命令字面分类失败码
@@ -590,17 +584,11 @@ func (r *Runner) validateTaskTextBudgets(task *Task) error {
 	}
 
 	totalReqs := totalRuneLen(task.Requirements)
-	if r.cfg.Execution.MaxRequirementsCount > 0 && len(task.Requirements) > r.cfg.Execution.MaxRequirementsCount {
-		return fmt.Errorf("TASK_TEXT_TOO_LARGE: task has %d requirements, max is %d", len(task.Requirements), r.cfg.Execution.MaxRequirementsCount)
-	}
 	if r.cfg.Execution.MaxRequirementsChars > 0 && totalReqs > r.cfg.Execution.MaxRequirementsChars {
 		return fmt.Errorf("TASK_TEXT_TOO_LARGE: sum(requirements) is %d chars, max is %d", totalReqs, r.cfg.Execution.MaxRequirementsChars)
 	}
 
 	totalAcc := totalRuneLen(task.AcceptanceCriteria)
-	if r.cfg.Execution.MaxAcceptanceCriteriaCount > 0 && len(task.AcceptanceCriteria) > r.cfg.Execution.MaxAcceptanceCriteriaCount {
-		return fmt.Errorf("TASK_TEXT_TOO_LARGE: task has %d acceptance criteria, max is %d", len(task.AcceptanceCriteria), r.cfg.Execution.MaxAcceptanceCriteriaCount)
-	}
 	if r.cfg.Execution.MaxAcceptanceCriteriaChars > 0 && totalAcc > r.cfg.Execution.MaxAcceptanceCriteriaChars {
 		return fmt.Errorf("TASK_TEXT_TOO_LARGE: sum(acceptance_criteria) is %d chars, max is %d", totalAcc, r.cfg.Execution.MaxAcceptanceCriteriaChars)
 	}
@@ -615,6 +603,169 @@ func totalRuneLen(items []string) int {
 		total += len([]rune(item))
 	}
 	return total
+}
+
+// taskDomainKeywords 任务领域关键词检测表
+var taskDomainKeywords = map[string][]string{
+	"ui": {
+		"页面", "界面", "按钮", "控件", "布局", "XAML", "WinForms", "WPF", "frontend", "UI",
+	},
+	"business_flow": {
+		"流程", "状态机", "零漂", "测试流程", "业务流程", "flow", "state machine",
+	},
+	"mes": {
+		"MES", "SaveProcedure", "GetProductInfo", "上传", "过站",
+	},
+	"protocol": {
+		"协议", "Modbus", "RTU", "TCP", "LoRa", "帧", "CRC", "串口",
+	},
+	"device_io": {
+		"PLC", "阀门", "水箱", "继电器", "传感器", "相机", "摄像头", "IO", "设备",
+	},
+	"config": {
+		"配置", "config", "schema", "yaml", "json", "setting",
+	},
+	"test": {
+		"测试", "单元测试", "go test", "dotnet test", "pytest", "test",
+	},
+	"docs": {
+		"文档", "README", "AGENTS", "说明", "docs",
+	},
+	"provider": {
+		"provider", "DeepSeek", "OpenAI", "Qwen", "模型", "API",
+	},
+	"report": {
+		"report", "报告", "summary", "state.json", "token", "usage",
+	},
+	"context": {
+		"context", "上下文", "allowed_files", "forbidden_files",
+	},
+	"snapshot": {
+		"snapshot", "backup", "bak", "worktree", "rollback", "回滚", "快照",
+	},
+	"cli": {
+		"CLI", "命令", "status", "report", "run", "rollback",
+	},
+}
+
+// detectTaskDomains 检测任务涉及的领域
+func detectTaskDomains(text string) []string {
+	lower := strings.ToLower(text)
+	found := map[string]bool{}
+	for domain, keywords := range taskDomainKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				found[domain] = true
+				break
+			}
+		}
+	}
+	var domains []string
+	for d := range found {
+		domains = append(domains, d)
+	}
+	return domains
+}
+
+// isWideGlob 判断 allowed_files pattern 是否过于宽泛
+func isWideGlob(pattern string) bool {
+	p := filepath.ToSlash(strings.TrimSpace(pattern))
+	if p == "*" || p == "**" || p == "." || p == "./" {
+		return true
+	}
+	if strings.Contains(p, "**") {
+		return true
+	}
+	if strings.HasSuffix(p, "/*") || strings.HasSuffix(p, "/**") {
+		return true
+	}
+	return false
+}
+
+// validateTaskScope 校验任务范围是否过大
+func (r *Runner) validateTaskScope(task *Task) error {
+	if r.cfg == nil || !r.cfg.Execution.RequireTaskSplit {
+		return nil
+	}
+
+	// 规则 1：标题过长
+	if r.cfg.Execution.MaxTaskTitleChars > 0 &&
+		len([]rune(task.Title)) > r.cfg.Execution.MaxTaskTitleChars {
+		return fmt.Errorf(
+			"TASK_TOO_BROAD: task title is too long (%d chars, max %d). Create a smaller task.",
+			len([]rune(task.Title)), r.cfg.Execution.MaxTaskTitleChars,
+		)
+	}
+
+	// 规则 2：allowed_files 提前检查
+	if r.cfg.Execution.EnforceTaskBudgets &&
+		len(task.AllowedFiles) > r.cfg.Execution.MaxTaskFiles {
+		return fmt.Errorf(
+			"TASK_TOO_BROAD: allowed_files count %d exceeds maximum %d. Split the task before collecting context.",
+			len(task.AllowedFiles), r.cfg.Execution.MaxTaskFiles,
+		)
+	}
+
+	// 规则 3：禁止宽泛 glob
+	if r.cfg.Execution.ForbidWideGlobAllowedFiles {
+		for _, pattern := range task.AllowedFiles {
+			if isWideGlob(pattern) {
+				return fmt.Errorf(
+					"TASK_TOO_BROAD: broad glob pattern %q is forbidden. Use explicit file paths instead (max %d files).",
+					pattern, r.cfg.Execution.MaxTaskFiles,
+				)
+			}
+		}
+	}
+
+	// 合并任务文本
+	combinedText := task.Title + " " + task.Description + " " +
+		strings.Join(task.Requirements, " ") + " " +
+		strings.Join(task.AcceptanceCriteria, " ")
+
+	// 规则 4：禁止多领域任务
+	if r.cfg.Execution.ForbidMultiDomainTask {
+		domains := detectTaskDomains(combinedText)
+		if len(domains) > r.cfg.Execution.MaxTaskDomains {
+			return fmt.Errorf(
+				"TASK_TOO_BROAD: task appears to span multiple domains %v. Split it into separate tasks.",
+				domains,
+			)
+		}
+	}
+
+	// 规则 5：命中宽泛任务关键词
+	if len(r.cfg.Execution.ForbidBroadTaskKeywords) > 0 {
+		lower := strings.ToLower(combinedText)
+		for _, kw := range r.cfg.Execution.ForbidBroadTaskKeywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				return fmt.Errorf(
+					"TASK_TOO_BROAD: task contains broad keyword %q. Split it into small tasks.",
+					kw,
+				)
+			}
+		}
+	}
+
+	// 规则 6：acceptance_criteria / requirements 数量过多
+	if r.cfg.Execution.EnforceTaskBudgets {
+		if r.cfg.Execution.MaxAcceptanceCriteriaCount > 0 &&
+			len(task.AcceptanceCriteria) > r.cfg.Execution.MaxAcceptanceCriteriaCount {
+			return fmt.Errorf(
+				"TASK_TOO_BROAD: task has %d acceptance criteria, max is %d. Split the task.",
+				len(task.AcceptanceCriteria), r.cfg.Execution.MaxAcceptanceCriteriaCount,
+			)
+		}
+		if r.cfg.Execution.MaxRequirementsCount > 0 &&
+			len(task.Requirements) > r.cfg.Execution.MaxRequirementsCount {
+			return fmt.Errorf(
+				"TASK_TOO_BROAD: task has %d requirements, max is %d. Split the task.",
+				len(task.Requirements), r.cfg.Execution.MaxRequirementsCount,
+			)
+		}
+	}
+
+	return nil
 }
 
 func (r *Runner) executorModels(task *Task, provider providers.Provider) []string {
@@ -729,7 +880,7 @@ func (r *Runner) finish(result *TaskResult, snapshot *sandbox.Snapshot, runErr e
 
 	// 填充 Phase（由各阶段设置，此处仅做最终 fallback）
 	if result.Phase == "" {
-		result.Phase = result.Status
+		result.Phase = string(result.Status)
 	}
 
 	// 从 runner 显式设置的字段填充 WriteState（不猜测）
